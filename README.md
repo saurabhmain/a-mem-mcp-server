@@ -206,6 +206,26 @@ This implementation is based on the research paper ["A-Mem: Agentic Memory for L
   - [AgenticMemory](https://github.com/WujiangXu/AgenticMemory) - Benchmark Evaluation
   - [A-mem-sys](https://github.com/WujiangXu/A-mem-sys) - Production-ready System
 
+## 🔄 Relationship to Original Implementation
+
+This implementation was developed independently based on the research paper ["A-Mem: Agentic Memory for LLM Agents"](https://arxiv.org/html/2502.12110v11). The original authors' production-ready system ([A-mem-sys](https://github.com/WujiangXu/A-mem-sys)) was discovered after this implementation was completed.
+
+**Key Differences:**
+
+This implementation focuses on **MCP Server integration** for IDE environments (Cursor, VSCode), providing:
+- Direct IDE integration via MCP protocol
+- Graph-based memory linking using NetworkX
+- File import with automatic chunking
+- Memory reset and management tools
+- Modern TUI benchmarking tool
+
+The original [A-mem-sys](https://github.com/WujiangXu/A-mem-sys) repository provides a **pip-installable Python library** with:
+- Multiple LLM backend support (OpenAI, Ollama, OpenRouter, SGLang)
+- Library-based integration for Python applications
+- Comprehensive API for programmatic usage
+
+Both implementations are valid approaches to the same research paper, serving different use cases and integration scenarios.
+
 ---
 
 **Created by tobi and the CURSOR IDE with the new Composer 1 model for the community ❤️**
