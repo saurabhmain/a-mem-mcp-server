@@ -1,0 +1,22 @@
+# A-MEM: Agentic Memory System - Dependencies
+
+# MCP Server
+mcp>=1.0.0
+
+# Core Dependencies
+pydantic>=2.0.0
+networkx>=3.0
+chromadb>=0.4.0
+
+# HTTP Requests für Ollama
+requests>=2.31.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# Optional: Für bessere Performance
+# sentence-transformers  # Nicht mehr benötigt, da Ollama verwendet wird
+
+# Benchmark Tool (optional)
+textual>=0.40.0
+
