@@ -11,9 +11,30 @@ import chromadb
 from typing import List, Dict, Tuple, Optional
 import os
 from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
 
 from ..config import settings
 from ..models.note import AtomicNote, NoteRelation
+
+# Log file path
+LOG_FILE = settings.DATA_DIR / "graph_save.log"
+
+def _write_log(message: str):
+    """Writes a log message to file and console."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] {message}\n"
+    
+    # Write to file
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(log_entry)
+    except Exception as e:
+        print(f"[WARNING] Failed to write log: {e}")
+    
+    # Also print to console
+    print(message)
 
 # --- Cross-Platform Locking ---
 try:
@@ -66,13 +87,58 @@ class GraphStore:
 
     def save_snapshot(self):
         """Saves the current state to disk."""
+        node_count = self.graph.number_of_nodes()
+        edge_count = self.graph.number_of_edges()
+        _write_log(f"[SAVE] [save_snapshot] Saving graph: {node_count} nodes, {edge_count} edges")
+        
         with self._file_lock():
             data = nx.node_link_data(self.graph)
+            nodes_in_data = len(data.get("nodes", []))
+            links_in_data = len(data.get("links", []))
+            _write_log(f"[SAVE] [save_snapshot] Data to save: {nodes_in_data} nodes, {links_in_data} links")
+            
             # Atomic write pattern: Write to temp, then rename
             temp_path = settings.GRAPH_PATH.with_suffix(".tmp")
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, settings.GRAPH_PATH)
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                _write_log(f"[SAVE] [save_snapshot] Temp file written: {temp_path}")
+            except Exception as e:
+                _write_log(f"[ERROR] [save_snapshot] Error writing temp file: {e}")
+                raise
+            
+            # Verify temp file
+            if temp_path.exists():
+                temp_size = temp_path.stat().st_size
+                _write_log(f"[SAVE] [save_snapshot] Temp file size: {temp_size} bytes")
+            else:
+                _write_log(f"[ERROR] [save_snapshot] Temp file does not exist after write!")
+            
+            try:
+                os.replace(temp_path, settings.GRAPH_PATH)
+                _write_log(f"[SAVE] [save_snapshot] File replaced: {settings.GRAPH_PATH}")
+            except Exception as e:
+                _write_log(f"[ERROR] [save_snapshot] Error replacing file: {e}")
+                raise
+            
+            # Verify final file
+            if settings.GRAPH_PATH.exists():
+                final_size = settings.GRAPH_PATH.stat().st_size
+                _write_log(f"[SAVE] [save_snapshot] Final file size: {final_size} bytes")
+                # Quick verification
+                try:
+                    with open(settings.GRAPH_PATH, 'r', encoding='utf-8') as f:
+                        verify_data = json.load(f)
+                        verify_nodes = len(verify_data.get("nodes", []))
+                        verify_links = len(verify_data.get("links", []))
+                        _write_log(f"[SAVE] [save_snapshot] Verified: {verify_nodes} nodes, {verify_links} links in saved file")
+                        
+                        if verify_nodes == 0 and node_count > 0:
+                            _write_log(f"[WARNING] [save_snapshot] WARNING: Graph had {node_count} nodes but saved file has 0 nodes!")
+                except Exception as e:
+                    _write_log(f"[WARNING] [save_snapshot] Verification failed: {e}")
+            else:
+                _write_log(f"[ERROR] [save_snapshot] Final file does not exist after replace!")
 
     def add_node(self, note: AtomicNote):
         """Adds node (In-Memory). Saving must be triggered separately."""
@@ -186,7 +252,7 @@ class VectorStore:
         actual_dim = len(embedding)
         if actual_dim != self._expected_dimension:
             from ..config import settings
-            print(f"⚠️  CRITICAL: Embedding dimension mismatch!")
+            print(f"[WARNING] CRITICAL: Embedding dimension mismatch!")
             print(f"   Expected: {self._expected_dimension} (from {settings.LLM_PROVIDER}/{settings.EMBEDDING_MODEL})")
             print(f"   Actual: {actual_dim}")
             print(f"   This will cause ChromaDB errors!")

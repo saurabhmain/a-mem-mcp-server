@@ -10,8 +10,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # Paths
-    BASE_DIR = Path(os.getcwd())
+    # Paths - Use absolute path based on file location, not cwd
+    # This ensures the paths work regardless of where the script is called from
+    _config_file = Path(__file__).resolve()
+    BASE_DIR = _config_file.parent.parent.parent  # Go up from src/a_mem/config.py to project root
     DATA_DIR = BASE_DIR / "data"
     CHROMA_DIR = DATA_DIR / "chroma"
     GRAPH_DIR = DATA_DIR / "graph"
@@ -52,6 +54,11 @@ class Config:
     
     # Concurrency
     LOCK_FILE = GRAPH_DIR / "graph.lock"
+    
+    # TCP Server Settings (optional, für Script-Zugriff)
+    TCP_SERVER_ENABLED = os.getenv("TCP_SERVER_ENABLED", "false").lower() == "true"
+    TCP_SERVER_HOST = os.getenv("TCP_SERVER_HOST", "127.0.0.1")
+    TCP_SERVER_PORT = int(os.getenv("TCP_SERVER_PORT", "42424"))
 
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ from mcp.types import Tool, TextContent
 from .core.logic import MemoryController
 from .models.note import NoteInput
 from .utils.enzymes import run_memory_enzymes
+from .config import settings
 
 # Server initialisieren
 server = Server("a-mem")
@@ -198,10 +199,16 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_graph",
-            description="Returns the full graph snapshot (nodes + edges).",
+            description="Returns the full graph snapshot (nodes + edges). Optionally saves the graph to disk for visualization tools.",
             inputSchema={
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "save": {
+                        "type": "boolean",
+                        "description": "If true, saves the graph to disk before returning (useful for visualization tools).",
+                        "default": False
+                    }
+                }
             }
         ),
         Tool(
@@ -548,10 +555,56 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
         )]
     
     elif name == "get_graph":
+        save_to_disk = arguments.get("save", False)
+        
+        # Get graph snapshot first to see what we have
         graph = await controller.get_graph_snapshot()
+        node_count = len(graph.get("nodes", []))
+        edge_count = len(graph.get("edges", []))
+        
+        # Log to file
+        from pathlib import Path
+        from datetime import datetime
+        log_file = Path(settings.DATA_DIR) / "graph_save.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        def write_log(msg):
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"[{timestamp}] {msg}\n")
+            print(msg)
+        
+        write_log(f"[INFO] [get_graph] Graph snapshot: {node_count} nodes, {edge_count} edges")
+        write_log(f"[INFO] [get_graph] Memory graph: {controller.storage.graph.graph.number_of_nodes()} nodes, {controller.storage.graph.graph.number_of_edges()} edges")
+        
+        # If save is requested, save the graph to disk
+        if save_to_disk:
+            loop = asyncio.get_running_loop()
+            write_log(f"[SAVE] [get_graph] Saving graph to disk...")
+            await loop.run_in_executor(None, controller.storage.graph.save_snapshot)
+            write_log(f"[SAVE] [get_graph] Save completed")
+            
+            # Verify after save
+            if settings.GRAPH_PATH.exists():
+                with open(settings.GRAPH_PATH, 'r', encoding='utf-8') as f:
+                    saved_data = json.load(f)
+                    saved_nodes = len(saved_data.get("nodes", []))
+                    saved_links = len(saved_data.get("links", []))
+                    write_log(f"[OK] [get_graph] Verified saved file: {saved_nodes} nodes, {saved_links} links")
+                    if saved_nodes == 0 and node_count > 0:
+                        write_log(f"[ERROR] [get_graph] ERROR: Graph had {node_count} nodes but saved file has 0 nodes!")
+        
+        result = {
+            "nodes": graph.get("nodes", []),
+            "edges": graph.get("edges", []),
+            "saved_to_disk": save_to_disk,
+            "memory_nodes": controller.storage.graph.graph.number_of_nodes(),
+            "memory_edges": controller.storage.graph.graph.number_of_edges()
+        }
+        
         return [TextContent(
             type="text",
-            text=json.dumps(graph, indent=2, ensure_ascii=False)
+            text=json.dumps(result, indent=2, ensure_ascii=False)
         )]
     
     elif name == "run_memory_enzymes":
@@ -562,7 +615,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             suggest_max = arguments.get("suggest_max", 10)
             
             # Run enzymes synchronously (in thread)
-            import asyncio
             loop = asyncio.get_running_loop()
             
             def _run_enzymes():
@@ -589,7 +641,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
                 text=json.dumps({
                     "status": "success",
                     "results": results,
-                    "message": f"Enzymes completed: {results['pruned_count']} links pruned, {results['suggestions_count']} relations suggested, {results['digested_count']} nodes digested."
+                    "message": f"Enzymes completed: {results['pruned_count']} links pruned, {results.get('zombie_nodes_removed', 0)} zombie nodes removed, {results['suggestions_count']} relations suggested, {results['digested_count']} nodes digested."
                 }, indent=2)
             )]
         except Exception as e:
@@ -606,9 +658,39 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
 
 async def main():
     """Main function for the MCP Server."""
-    # Starte automatischen Enzyme-Scheduler (alle 1 Stunde)
-    controller.start_enzyme_scheduler(interval_hours=1.0)
+    # Initial save: Save graph to disk on startup so visualizer can access it
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, controller.storage.graph.save_snapshot)
+    print("[SAVE] Initial graph snapshot saved to disk")
     
+    # Starte automatischen Enzyme-Scheduler (alle 1 Stunde)
+    # Auto-Save alle 5 Minuten, damit Visualizer die Daten sehen kann
+    controller.start_enzyme_scheduler(interval_hours=1.0, auto_save_interval_minutes=5.0)
+    
+    # Starte HTTP-Server parallel (wenn enabled) - nutzt GLEICHE controller-Instanz
+    http_task = None
+    if settings.TCP_SERVER_ENABLED:
+        from aiohttp import web
+        
+        async def get_graph_handler(request):
+            """HTTP Handler für get_graph"""
+            graph_data = await controller.get_graph_snapshot()
+            return web.json_response(graph_data)
+        
+        async def run_http_server():
+            app = web.Application()
+            app.router.add_get('/get_graph', get_graph_handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, settings.TCP_SERVER_HOST, settings.TCP_SERVER_PORT)
+            await site.start()
+            print(f"[HTTP] HTTP-Server gestartet auf http://{settings.TCP_SERVER_HOST}:{settings.TCP_SERVER_PORT}/get_graph")
+            # Lauf ewig
+            await asyncio.Event().wait()
+        
+        http_task = asyncio.create_task(run_http_server())
+    
+    # Haupt-Server: stdio für Cursor/IDE
     async with stdio_server() as (read_stream, write_stream):
         try:
             await server.run(
@@ -617,6 +699,18 @@ async def main():
                 server.create_initialization_options()
             )
         finally:
+            # Stoppe HTTP-Server wenn aktiv
+            if http_task:
+                http_task.cancel()
+                try:
+                    await http_task
+                except asyncio.CancelledError:
+                    pass
+                print("[STOP] HTTP-Server gestoppt")
+            
+            # Final save: Save graph to disk on shutdown
+            await loop.run_in_executor(None, controller.storage.graph.save_snapshot)
+            print("[SAVE] Final graph snapshot saved to disk")
             # Stoppe Scheduler beim Shutdown
             controller.stop_enzyme_scheduler()
 

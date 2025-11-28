@@ -20,3 +20,11 @@ python-dotenv>=1.0.0
 # Benchmark Tool (optional)
 textual>=0.40.0
 
+# Visualization Tool (optional)
+dash>=2.14.0
+plotly>=5.17.0
+pandas>=2.0.0
+
+# HTTP Server (optional, für Script-Zugriff)
+aiohttp>=3.9.0
+

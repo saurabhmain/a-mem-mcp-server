@@ -98,7 +98,8 @@ All critical operations are logged to `data/events.jsonl`:
 
 ### Memory Enzymes
 Autonomous background processes that maintain graph health:
-- **Link Pruner**: Removes edges older than 90 days or with weight < 0.3
+- **Link Pruner**: Removes edges older than 90 days or with weight < 0.3, and orphaned edges to missing/zombie nodes
+- **Zombie Node Remover**: Automatically removes nodes without content (empty nodes)
 - **Relation Suggester**: Finds semantically similar notes (cosine similarity ≥ 0.75)
 - **Summary Digester**: Compresses nodes with >8 children into compact summaries
 
@@ -146,6 +147,15 @@ OPENROUTER_LLM_MODEL=openai/gpt-4o-mini
 OPENROUTER_EMBEDDING_MODEL=openai/text-embedding-3-small
 ```
 
+**Optional HTTP Server (for external tools):**
+```env
+TCP_SERVER_ENABLED=true
+TCP_SERVER_HOST=127.0.0.1
+TCP_SERVER_PORT=42424
+```
+
+When enabled, the MCP server runs an additional HTTP server in parallel, exposing the graph data at `http://127.0.0.1:42424/get_graph`. This allows external tools (like `extract_graph.py`) to access the current graph state without interfering with the stdio MCP protocol.
+
 ### 3. Install Ollama Models (only when LLM_PROVIDER=ollama)
 
 ```bash
@@ -189,7 +199,7 @@ python mcp_server.py
 13. **`get_graph`** - Returns the full graph snapshot (nodes + edges) for visualization
 
 #### Memory Maintenance
-14. **`run_memory_enzymes`** - Runs memory maintenance: prunes old/weak links, suggests new relations, digests overcrowded nodes. Automatically optimizes graph structure
+14. **`run_memory_enzymes`** - Runs memory maintenance: prunes old/weak links and zombie nodes, suggests new relations, digests overcrowded nodes. Automatically optimizes graph structure
 
 ### IDE Integration
 
@@ -327,6 +337,32 @@ This tool measures model speed metrics (tokens/sec, latency, first token time) t
 
 See `BENCHMARK_README.md` for details.
 
+## 📊 Graph Visualization
+
+The project includes a web-based dashboard for visualizing the memory graph, analyzing priorities, and exploring patterns:
+
+```bash
+python tools/visualize_memory.py
+```
+
+Then open your browser to `http://localhost:8050` to view the interactive dashboard.
+
+**Data Sync:** The visualizer loads graph data from `data/graph/knowledge_graph.json`. To update the data, run:
+```bash
+python tools/extract_graph.py
+```
+
+This script connects to the running MCP server via HTTP (if `TCP_SERVER_ENABLED=true` in `.env`) and saves the current graph state to disk.
+
+**Features:**
+- **Graph Visualization**: Interactive network graph with node sizes based on priority and colors based on type
+- **Priority Statistics**: Box plots showing priority distribution by note type
+- **Relations Analysis**: Bar chart of relation types distribution
+- **Event Timeline**: Timeline visualization of all system events
+- **Node Details**: Detailed table with priority, edge count, summaries, and tags
+
+The dashboard automatically refreshes when you click the refresh button, allowing you to explore patterns and insights in your memory system.
+
 ## 📊 Status
 
 ✅ **100% Paper-Compliance**  
@@ -338,7 +374,8 @@ See `BENCHMARK_README.md` for details.
 ✅ **Type Classification & Priority Scoring**  
 ✅ **Event Logging & Audit Trail**  
 ✅ **Memory Enzymes (Autonomous Graph Maintenance)**  
-✅ **Automatic Scheduler (Hourly Maintenance)**
+✅ **Automatic Scheduler (Hourly Maintenance)**  
+✅ **HTTP Server** (optional, for external tools like `extract_graph.py`)
 
 ## 📄 License
 

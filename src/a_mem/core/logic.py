@@ -18,6 +18,9 @@ class MemoryController:
         self.storage = StorageManager()
         self.llm = LLMService()
         self._enzyme_scheduler_task = None
+        self._auto_save_task = None
+        self._enzyme_scheduler_running = False
+        self._auto_save_interval = 5.0  # Default: 5 minutes
         self._enzyme_scheduler_running = False
 
     async def create_note(self, input_data: NoteInput) -> str:
@@ -50,8 +53,9 @@ class MemoryController:
         await loop.run_in_executor(None, self.storage.vector.add, note, embedding)
         await loop.run_in_executor(None, self.storage.graph.add_node, note)
         
-        # Explicit snapshot save after adding
+        # Explicit snapshot save after adding (so visualizer can see new notes)
         await loop.run_in_executor(None, self.storage.graph.save_snapshot)
+        print(f"[SAVE] Graph saved after creating note {note.id}")
         
         # 5. Event Logging
         log_event("NOTE_CREATED", {
@@ -72,7 +76,7 @@ class MemoryController:
         Batch-Update strategy for the graph.
         """
         loop = asyncio.get_running_loop()
-        print(f"🔄 Evolving memory for note {new_note.id}...")
+        print(f"[EVOLVE] Evolving memory for note {new_note.id}...")
         
         try:
             # 1. Candidate search (I/O in thread)
@@ -100,7 +104,7 @@ class MemoryController:
                 )
                 
                 if is_related and relation:
-                    print(f"🔗 Linking {new_note.id} -> {c_id} ({relation.relation_type})")
+                    print(f"[LINK] Linking {new_note.id} -> {c_id} ({relation.relation_type})")
                     # In-Memory Update (fast)
                     self.storage.graph.add_edge(relation)
                     links_found += 1
@@ -120,7 +124,7 @@ class MemoryController:
                 )
                 
                 if evolved_note:
-                    print(f"🧠 Evolving memory {candidate_note.id} based on new information")
+                    print(f"[EVOLVE] Evolving memory {candidate_note.id} based on new information")
                     
                     # Calculate new embedding (Paper Section 3.1, Formula 3):
                     # ei = fenc[concat(ci, Ki, Gi, Xi)]
@@ -150,14 +154,16 @@ class MemoryController:
                     })
             
             # 4. Batch Save (Single write to disk)
+            # Always save after evolution so visualizer can see updates
+            await loop.run_in_executor(None, self.storage.graph.save_snapshot)
             if links_found > 0 or evolutions_found > 0:
-                await loop.run_in_executor(None, self.storage.graph.save_snapshot)
-                print(f"✅ Evolution finished. {links_found} links, {evolutions_found} memory updates saved.")
+                print(f"[OK] Evolution finished. {links_found} links, {evolutions_found} memory updates saved.")
             else:
-                print("✅ Evolution finished. No new links or updates.")
+                print("[OK] Evolution finished. No new links or updates.")
+            print(f"[SAVE] Graph saved after evolution")
 
         except Exception as e:
-            print(f"❌ Evolution failed for {new_note.id}: {e}")
+            print(f"[ERROR] Evolution failed for {new_note.id}: {e}")
 
     async def retrieve(self, query: str) -> List[SearchResult]:
         loop = asyncio.get_running_loop()
@@ -410,24 +416,31 @@ class MemoryController:
 
         return await loop.run_in_executor(None, _remove)
     
-    def start_enzyme_scheduler(self, interval_hours: float = 1.0):
+    def start_enzyme_scheduler(self, interval_hours: float = 1.0, auto_save_interval_minutes: float = 5.0):
         """
         Startet den automatischen Enzyme-Scheduler.
         
         Args:
             interval_hours: Intervall in Stunden (default: 1.0 = 1 Stunde)
+            auto_save_interval_minutes: Intervall in Minuten für automatisches Speichern (default: 5.0)
         """
         if self._enzyme_scheduler_running:
-            print("⚠️ Enzyme-Scheduler läuft bereits")
+            print("[WARNING] Enzyme-Scheduler läuft bereits")
             return
         
         self._enzyme_scheduler_running = True
+        self._auto_save_interval = auto_save_interval_minutes
         self._enzyme_scheduler_task = asyncio.create_task(
             self._enzyme_scheduler_loop(interval_hours)
         )
-        print(f"✅ Enzyme-Scheduler gestartet (Intervall: {interval_hours}h)")
+        # Start auto-save task
+        self._auto_save_task = asyncio.create_task(
+            self._auto_save_loop(auto_save_interval_minutes)
+        )
+        print(f"[OK] Enzyme-Scheduler gestartet (Intervall: {interval_hours}h, Auto-Save: {auto_save_interval_minutes}min)")
         log_event("ENZYME_SCHEDULER_STARTED", {
-            "interval_hours": interval_hours
+            "interval_hours": interval_hours,
+            "auto_save_interval_minutes": auto_save_interval_minutes
         })
     
     def stop_enzyme_scheduler(self):
@@ -435,8 +448,10 @@ class MemoryController:
         if self._enzyme_scheduler_task:
             self._enzyme_scheduler_task.cancel()
             self._enzyme_scheduler_running = False
-            print("🛑 Enzyme-Scheduler gestoppt")
-            log_event("ENZYME_SCHEDULER_STOPPED", {})
+        if self._auto_save_task:
+            self._auto_save_task.cancel()
+        print("[STOP] Enzyme-Scheduler gestoppt")
+        log_event("ENZYME_SCHEDULER_STOPPED", {})
     
     async def _enzyme_scheduler_loop(self, interval_hours: float):
         """
@@ -453,7 +468,7 @@ class MemoryController:
                 await asyncio.sleep(interval_seconds)
                 
                 # Führe Enzyme aus
-                print(f"🔄 [Scheduler] Führe Memory-Enzyme aus...")
+                print(f"[SCHEDULER] Führe Memory-Enzyme aus...")
                 loop = asyncio.get_running_loop()
                 
                 def _run_enzymes():
@@ -475,7 +490,8 @@ class MemoryController:
                 # Graph speichern
                 await loop.run_in_executor(None, self.storage.graph.save_snapshot)
                 
-                print(f"✅ [Scheduler] Enzyme abgeschlossen: {results['pruned_count']} pruned, {results['suggestions_count']} suggested, {results['digested_count']} digested")
+                zombie_count = results.get('zombie_nodes_removed', 0)
+                print(f"[OK] [Scheduler] Enzyme abgeschlossen: {results['pruned_count']} links pruned, {zombie_count} zombie nodes removed, {results['suggestions_count']} suggested, {results['digested_count']} digested")
                 
                 log_event("ENZYME_SCHEDULER_RUN", {
                     "results": results,
@@ -483,13 +499,42 @@ class MemoryController:
                 })
                 
             except asyncio.CancelledError:
-                print("🛑 [Scheduler] Wurde gestoppt")
+                print("[STOP] [Scheduler] Wurde gestoppt")
                 break
             except Exception as e:
-                print(f"❌ [Scheduler] Fehler bei Enzyme-Ausführung: {e}")
+                print(f"[ERROR] [Scheduler] Fehler bei Enzyme-Ausführung: {e}")
                 log_event("ENZYME_SCHEDULER_ERROR", {
                     "error": str(e)
                 })
                 # Warte kurz bevor Retry (um nicht in Endlosschleife zu kommen)
                 await asyncio.sleep(60)  # 1 Minute
+    
+    async def _auto_save_loop(self, interval_minutes: float):
+        """
+        Background-Loop für automatisches Speichern des Graphs.
+        
+        Args:
+            interval_minutes: Intervall in Minuten
+        """
+        interval_seconds = interval_minutes * 60
+        
+        while self._enzyme_scheduler_running:
+            try:
+                # Warte auf Intervall
+                await asyncio.sleep(interval_seconds)
+                
+                # Speichere Graph
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.storage.graph.save_snapshot)
+                print(f"[SAVE] [Auto-Save] Graph saved to disk")
+                log_event("AUTO_SAVE", {"interval_minutes": interval_minutes})
+                
+            except asyncio.CancelledError:
+                print("[STOP] [Auto-Save] Wurde gestoppt")
+                break
+            except Exception as e:
+                print(f"[ERROR] [Auto-Save] Fehler beim Speichern: {e}")
+                log_event("AUTO_SAVE_ERROR", {"error": str(e)})
+                # Warte kurz bevor Retry
+                await asyncio.sleep(30)  # 30 Sekunden
 

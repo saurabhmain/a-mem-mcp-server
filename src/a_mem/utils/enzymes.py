@@ -52,6 +52,49 @@ def prune_links(
     for source, target, data in graph.graph.edges(data=True):
         should_remove = False
         
+        # CRITICAL: Orphaned Edge Check - Entferne Edges zu nicht existierenden Nodes
+        if source not in graph.graph.nodes or target not in graph.graph.nodes:
+            to_remove.append((source, target))
+            log_event("RELATION_PRUNED", {
+                "source": source,
+                "target": target,
+                "reason": "orphaned_edge_missing_node"
+            })
+            continue  # Skip weitere Checks, Edge wird entfernt
+        
+        # CRITICAL: Zombie Node Check - Entferne Edges zu Nodes ohne Content (gelöschte Nodes)
+        source_node = graph.graph.nodes[source]
+        target_node = graph.graph.nodes[target]
+        
+        # Prüfe ob Nodes leer sind (keine Keys) oder kein Content haben
+        source_is_empty = len(source_node) == 0 or "content" not in source_node
+        target_is_empty = len(target_node) == 0 or "content" not in target_node
+        
+        if not source_is_empty:
+            source_content = source_node.get("content", "")
+            source_has_content = source_content and len(str(source_content).strip()) > 0
+        else:
+            source_has_content = False
+        
+        if not target_is_empty:
+            target_content = target_node.get("content", "")
+            target_has_content = target_content and len(str(target_content).strip()) > 0
+        else:
+            target_has_content = False
+        
+        if not source_has_content or not target_has_content:
+            to_remove.append((source, target))
+            log_event("RELATION_PRUNED", {
+                "source": source,
+                "target": target,
+                "reason": "orphaned_edge_zombie_node",
+                "source_is_empty": source_is_empty,
+                "target_is_empty": target_is_empty,
+                "source_has_content": source_has_content,
+                "target_has_content": target_has_content
+            })
+            continue  # Skip weitere Checks, Edge wird entfernt
+        
         # Weight-Check: Schwache Verbindungen entfernen
         weight = data.get("weight", 1.0)
         if weight < min_weight:
@@ -105,6 +148,51 @@ def prune_links(
             "count": len(to_remove),
             "max_age_days": max_age_days,
             "min_weight": min_weight
+        })
+    
+    return len(to_remove)
+
+
+def prune_zombie_nodes(graph: GraphStore) -> int:
+    """
+    Entfernt Zombie-Nodes (Nodes ohne Content) aus dem Graph.
+    
+    Args:
+        graph: GraphStore Instanz
+    
+    Returns:
+        Anzahl entfernte Nodes
+    """
+    to_remove = []
+    
+    for node_id in list(graph.graph.nodes()):
+        node_data = graph.graph.nodes[node_id]
+        
+        # Prüfe ob Node leer ist (keine Keys) oder kein Content hat
+        is_empty = len(node_data) == 0 or "content" not in node_data
+        
+        if not is_empty:
+            content = node_data.get("content", "")
+            has_content = content and len(str(content).strip()) > 0
+        else:
+            has_content = False
+        
+        if not has_content:
+            to_remove.append(node_id)
+            log_event("NODE_PRUNED", {
+                "node_id": node_id,
+                "reason": "zombie_node_no_content",
+                "is_empty": is_empty
+            })
+    
+    # Entferne Nodes
+    for node_id in to_remove:
+        graph.graph.remove_node(node_id)
+    
+    if to_remove:
+        log_event("ZOMBIE_NODES_PRUNED", {
+            "count": len(to_remove),
+            "node_ids": to_remove[:10]  # Nur erste 10 loggen
         })
     
     return len(to_remove)
@@ -250,6 +338,7 @@ def run_memory_enzymes(
     """
     results = {
         "pruned_count": 0,
+        "zombie_nodes_removed": 0,
         "suggestions_count": 0,
         "digested_count": 0
     }
@@ -257,6 +346,9 @@ def run_memory_enzymes(
     # 1. Prune Links
     prune_params = prune_config or {}
     results["pruned_count"] = prune_links(graph, **prune_params)
+    
+    # 1.5. Prune Zombie Nodes (nach Links, damit keine orphaned Edges entstehen)
+    results["zombie_nodes_removed"] = prune_zombie_nodes(graph)
     
     # 2. Suggest Relations
     # Sammle alle Notes
