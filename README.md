@@ -72,14 +72,6 @@ The original [A-mem-sys](https://github.com/WujiangXu/A-mem-sys) repository prov
 
 Both implementations are valid approaches to the same research paper, serving different use cases and integration scenarios.
 
-## 🏗️ Framework
-
-The framework of our Agentic Memory system showing the dynamic interaction between LLM agents and memory components, extended with our MCP Server integration and dual-storage architecture:
-
-![Framework](framework_extended.jpg)
-
-*The framework diagram illustrates the core memory system workflow: Note Construction (left), Memory Processing with MCP Server Integration (center), and Memory Retrieval (right). Our implementation extends the original framework with direct IDE integration via MCP protocol, explicit graph-based memory linking using NetworkX DiGraph with typed edges (relation_type, reasoning, weight), file import with automatic chunking, and a dual-storage architecture using ChromaDB for vector similarity search and NetworkX for explicit typed relationships.*
-
 ## 🆕 New Features Overview
 
 ### Type Classification
