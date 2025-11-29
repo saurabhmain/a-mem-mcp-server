@@ -26,6 +26,12 @@ An agentic memory system for LLM agents based on the Zettelkasten principle.
   - **Summary Digester**: Compresses overcrowded nodes with many children
 - ✅ **Automatic Scheduler**: Runs memory enzymes every hour in the background
 - ✅ **Metadata Field**: Experimental fields support without schema changes
+- ✅ **Researcher Agent**: Deep web research for low-confidence queries (JIT context optimization)
+  - Automatic triggering when retrieval confidence < threshold
+  - Manual research via `research_and_store` MCP tool
+  - Hybrid approach: MCP tools (if available) or HTTP-based fallbacks (Google Search API, DuckDuckGo, Jina Reader)
+- ✅ **Local Jina Reader**: Support for local Docker-based Jina Reader instance (fallback to cloud API)
+- ✅ **Unstructured PDF Extraction**: Automatic PDF extraction using Unstructured (library or API)
 
 ## 🔄 Relationship to Original Implementation
 
@@ -140,6 +146,56 @@ OLLAMA_EMBEDDING_MODEL=nomic-embed-text:latest
 ```
 
 **Example `.env` for OpenRouter:**
+
+**Researcher Agent & Content Extraction (Optional):**
+
+```env
+# Researcher Agent (for low-confidence retrieval)
+RESEARCHER_ENABLED=true
+RESEARCHER_CONFIDENCE_THRESHOLD=0.5
+RESEARCHER_MAX_SOURCES=5
+RESEARCHER_MAX_CONTENT_LENGTH=10000
+
+# Google Search API (for web search) - uses existing GetWeb config
+GOOGLE_SEARCH_ENABLED=true
+GOOGLE_API_KEY=your_google_api_key  # Optional, uses default if not set
+GOOGLE_SEARCH_ENGINE_ID=your_search_engine_id  # Optional, uses default if not set
+
+# Local Jina Reader (Docker) - for web content extraction
+# If you have a local Jina Reader Docker instance running
+JINA_READER_ENABLED=true
+JINA_READER_HOST=localhost
+JINA_READER_PORT=2222
+
+# Unstructured (for PDF extraction)
+# Option 1: Use library directly (requires: pip install unstructured[pdf])
+UNSTRUCTURED_ENABLED=true
+UNSTRUCTURED_USE_LIBRARY=true
+
+# Option 2: Use API (if Unstructured API is running)
+# UNSTRUCTURED_ENABLED=true
+# UNSTRUCTURED_API_URL=http://localhost:8000
+# UNSTRUCTURED_API_KEY=your_api_key_here  # Optional
+```
+
+**Note:** 
+- **Web Search**: The Researcher Agent uses **Google Search API** (if configured) for high-quality search results, falling back to DuckDuckGo HTTP search if not available.
+- **Content Extraction**: Uses **local Jina Reader** (if enabled) for web content extraction, falling back to cloud API if local instance is unavailable.
+- **PDF Extraction**: For **PDF URLs**, the Researcher Agent uses **Unstructured** for extraction (library or API).
+- **Extraction Strategy**: 
+  - Search: Google Search API → DuckDuckGo HTTP fallback
+  - Web Content: Jina Reader (local/cloud) → Readability fallback
+  - PDFs: Unstructured (library/API)
+
+**Installing Unstructured for PDF extraction:**
+```bash
+# Full installation with PDF support
+pip install "unstructured[pdf]"
+
+# Or minimal installation (may require additional dependencies)
+pip install unstructured
+pip install pdfminer.six  # Required for PDF extraction
+```
 ```env
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=your_api_key_here
@@ -175,7 +231,7 @@ Make sure Ollama is running on `http://localhost:11434`.
 python mcp_server.py
 ```
 
-### Available Tools (14 Total)
+### Available Tools (15 Total)
 
 #### Core Memory Operations
 1. **`create_atomic_note`** - Stores a new piece of information. Automatically classifies note type, extracts metadata, and starts linking/evolution in background
@@ -200,6 +256,9 @@ python mcp_server.py
 
 #### Memory Maintenance
 14. **`run_memory_enzymes`** - Runs memory maintenance: prunes old/weak links and zombie nodes, suggests new relations, digests overcrowded nodes. Automatically optimizes graph structure
+
+#### Research & Web Integration
+15. **`research_and_store`** - Performs deep web research on a query and stores findings as atomic notes. Uses Google Search API (if configured) or DuckDuckGo HTTP search, extracts content with Jina Reader (local Docker or cloud), and processes PDFs with Unstructured. Automatically creates notes with metadata, keywords, and tags.
 
 ### IDE Integration
 
