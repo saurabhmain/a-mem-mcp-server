@@ -38,3 +38,20 @@ rich>=13.0.0
 beautifulsoup4>=4.12.0
 html2text>=2024.2.26
 
+# Graph Database Backend (optional)
+# Set GRAPH_BACKEND=networkx|falkordb|rustworkx in .env to use
+#
+# NetworkX (default): Already included above (networkx>=3.0)
+#
+# RustworkX (fastest, Windows-compatible): Install with: pip install rustworkx
+rustworkx>=0.14.0  # Uncomment to enable RustworkX support (3x-100x faster than NetworkX)
+#
+# FalkorDB (persistent graph database):
+# Linux/macOS: Install with: pip install falkordblite
+# Windows: Install with: pip install falkordb redis (and run Redis with FalkorDB module)
+# See docs/WINDOWS_FALKORDB_SETUP.md for Windows setup
+#
+# falkordblite>=1.0.0  # Linux/macOS: Uncomment to enable FalkorDBLite support
+# falkordb>=1.0.0      # Windows: Uncomment to enable FalkorDB Windows adapter
+# redis>=4.5.0         # Windows: Required for FalkorDB Windows adapter
+

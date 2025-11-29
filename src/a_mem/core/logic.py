@@ -208,7 +208,14 @@ class MemoryController:
             
             # Get edge count (graph degree) for priority calculation
             graph = self.storage.graph.graph
-            edge_count = graph.degree(n_id) if n_id in graph else 0
+            # Check if node exists - support both 'in graph' and 'in graph.nodes'
+            if hasattr(graph, '__contains__'):
+                node_exists = n_id in graph
+            elif hasattr(graph, 'nodes') and hasattr(graph.nodes, '__contains__'):
+                node_exists = n_id in graph.nodes
+            else:
+                node_exists = False
+            edge_count = graph.degree(n_id) if node_exists else 0
             
             # Compute priority score (on-the-fly)
             priority = compute_priority(note, usage_count=0, edge_count=edge_count)
@@ -409,17 +416,27 @@ class MemoryController:
             for node_id, attrs in self.storage.graph.graph.nodes(data=True):
                 data = dict(attrs)
                 data.setdefault("id", node_id)
+                # Convert datetime objects to ISO strings for JSON serialization
+                if 'created_at' in data and not isinstance(data['created_at'], str):
+                    from datetime import datetime
+                    if isinstance(data['created_at'], datetime):
+                        data['created_at'] = data['created_at'].isoformat()
+                    else:
+                        data['created_at'] = str(data['created_at'])
                 nodes.append(data)
 
             edges = []
             for source, target, attrs in self.storage.graph.graph.edges(data=True):
+                # Handle None attrs gracefully
+                if attrs is None:
+                    attrs = {}
                 edges.append(
                     {
                         "source": source,
                         "target": target,
-                        "relation_type": attrs.get("type", "relates_to"),
-                        "reasoning": attrs.get("reasoning", ""),
-                        "weight": attrs.get("weight", 1.0),
+                        "relation_type": attrs.get("type", "relates_to") if isinstance(attrs, dict) else "relates_to",
+                        "reasoning": attrs.get("reasoning", "") if isinstance(attrs, dict) else "",
+                        "weight": attrs.get("weight", 1.0) if isinstance(attrs, dict) else 1.0,
                     }
                 )
             return {"nodes": nodes, "edges": edges}

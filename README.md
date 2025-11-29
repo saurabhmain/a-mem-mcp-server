@@ -15,6 +15,9 @@ An agentic memory system for LLM agents based on the Zettelkasten principle.
 - ✅ **Semantic Retrieval**: Intelligent search with graph traversal
 - ✅ **Multi-Provider Support**: Ollama (local) or OpenRouter (cloud)
 - ✅ **Environment Variables**: Configuration via `.env` file
+- ✅ **Graph Backend Selection**: Choose between NetworkX (default), RustworkX (3x-100x faster), or FalkorDB (experimental, not fully tested)
+- ✅ **Parameter Validation**: Automatic validation of all MCP tool parameters
+- ✅ **Safe Graph Wrapper**: Edge case handling and data sanitization for robust operations
 
 ### Advanced Features (New)
 - ✅ **Type Classification**: Automatic classification of notes into 6 types (rule, procedure, concept, tool, reference, integration)
@@ -56,9 +59,11 @@ The original [A-mem-sys](https://github.com/WujiangXu/A-mem-sys) repository prov
 
 - **This implementation**: Dual-storage architecture
   - ChromaDB for vector similarity search
-  - NetworkX DiGraph for explicit typed relationships (with `relation_type`, `reasoning`, `weight`)
+  - **Graph Backend Selection**: NetworkX (default), RustworkX (3x-100x faster), or FalkorDB (experimental, not fully tested)
+  - Explicit typed relationships (with `relation_type`, `reasoning`, `weight`)
   - Graph traversal for finding directly connected memories
   - Enables complex queries like "find all memories related to X through type Y"
+  - **Safe Graph Wrapper**: Automatic edge case handling and data sanitization
 
 - **Original implementation**: Single-storage architecture
   - ChromaDB as primary storage
@@ -99,6 +104,17 @@ All critical operations are logged to `data/events.jsonl`:
 - `RELATION_CREATED`: When two notes are linked
 - `MEMORY_EVOLVED`: When an existing note is updated
 - `LINKS_PRUNED`: When old/weak links are removed
+- `RELATION_PRUNED`: When a specific relation is pruned (with reason)
+- `NODE_PRUNED`: When a zombie node is removed
+- `DUPLICATES_MERGED`: When duplicate notes are merged
+- `SELF_LOOPS_REMOVED`: When self-loops are removed
+- `ISOLATED_NODES_FOUND`: When isolated nodes are detected
+- `ISOLATED_NODES_LINKED`: When isolated nodes are automatically linked
+- `KEYWORDS_NORMALIZED`: When keywords are normalized
+- `QUALITY_SCORES_CALCULATED`: When quality scores are calculated
+- `NOTES_VALIDATED`: When notes are validated
+- `LOW_QUALITY_NOTES_REMOVED`: When low-quality notes are removed
+- `CORRUPTED_NODES_REPAIRED`: When corrupted nodes are repaired
 - `RELATIONS_SUGGESTED`: When new connections are found
 - `ENZYME_SCHEDULER_RUN`: When automatic maintenance runs
 
@@ -106,14 +122,27 @@ All critical operations are logged to `data/events.jsonl`:
 Autonomous background processes that maintain graph health:
 - **Link Pruner**: Removes edges older than 90 days or with weight < 0.3, and orphaned edges to missing/zombie nodes
 - **Zombie Node Remover**: Automatically removes nodes without content (empty nodes)
+- **Duplicate Merger**: Finds and merges duplicate notes (exact matches + semantic duplicates via embeddings)
+- **Edge Validator**: Validates and fixes edges (adds missing reasoning, standardizes types, removes weak edges)
+- **Self-Loop Remover**: Removes self-referential edges (nodes linking to themselves)
+- **Isolated Node Finder**: Identifies nodes without any connections
+- **Isolated Node Linker**: Automatically links isolated nodes to similar notes (similarity threshold: 0.70)
+- **Keyword Normalizer**: Normalizes and cleans keywords (removes duplicates, corrects typos, limits to max 7 keywords)
+- **Quality Score Calculator**: Calculates quality scores for notes (based on content, metadata, connections)
+- **Note Validator**: Validates notes and corrects missing/invalid fields (summary, keywords, tags)
+- **Low Quality Note Remover**: Removes irrelevant notes (CAPTCHA pages, error pages, spam)
+- **Summary Refiner**: Refines similar summaries to make them more specific and distinct
+- **Corrupted Node Repairer**: Repairs corrupted nodes (missing fields, invalid data)
 - **Relation Suggester**: Finds semantically similar notes (cosine similarity ≥ 0.75)
 - **Summary Digester**: Compresses nodes with >8 children into compact summaries
 
 ### Automatic Scheduler
 The system automatically runs memory enzymes every hour:
 - Runs in background without blocking MCP operations
-- Logs all maintenance activities
+- Executes 14+ maintenance operations in optimized sequence
+- Logs all maintenance activities with detailed metrics
 - Gracefully handles errors and continues running
+- **Comprehensive Results**: Returns detailed statistics for all operations (pruned links, merged duplicates, validated notes, quality scores, etc.)
 
 ### Researcher Agent
 Deep web research for low-confidence queries with JIT context optimization:
@@ -133,13 +162,47 @@ Deep web research for low-confidence queries with JIT context optimization:
 pip install -r requirements.txt
 ```
 
+### Graph Backend Selection
+
+A-MEM supports three graph backends, selectable via `GRAPH_BACKEND` environment variable:
+
+**NetworkX (Default):**
+- ✅ Included by default (no extra installation)
+- ✅ Cross-platform (Windows, Linux, macOS)
+- ✅ Good for small to medium graphs (<10k nodes)
+
+**RustworkX (Recommended for Performance):**
+- ⚡ **3x-100x faster** than NetworkX
+- ✅ Windows-compatible
+- ✅ Install with: `pip install rustworkx`
+- ✅ Set `GRAPH_BACKEND=rustworkx` in `.env`
+
+**FalkorDB (Experimental - Not Fully Integrated/Tested):**
+- ⚠️ **Proof-of-Concept Status** - Funktional, aber noch nicht vollständig integriert und getestet
+- 💾 **Persistent storage** (survives restarts)
+- ⚠️ **Nicht empfohlen für Production** - Siehe `docs/FALKORDB_POC_README.md` für Details
+- **Linux/macOS**: Install with `pip install falkordblite`, set `GRAPH_BACKEND=falkordb`
+- **Windows**: Install with `pip install falkordb redis`, requires Redis with FalkorDB module (see `docs/WINDOWS_FALKORDB_SETUP.md`)
+- ⚠️ **Bekannte Einschränkungen**: Memory Enzymes nutzen noch direkte `graph.graph` Zugriffe, Migration-Tool fehlt, Performance noch nicht getestet
+
+**Safe Graph Wrapper:**
+- 🛡️ Automatic edge case handling and data sanitization
+- ✅ Enabled automatically when using RustworkX
+- ✅ Validates and sanitizes all graph operations
+
 ### 2. Configure Environment Variables
 
 Copy `.env.example` to `.env` and adjust the values:
 
 ```bash
+# Windows (PowerShell)
+Copy-Item .env.example .env
+
+# Linux/macOS
 cp .env.example .env
 ```
+
+**Important:** The `.env.example` file contains all available configuration options including the `GRAPH_BACKEND` setting for selecting the graph database backend.
 
 **Configuration Strategy (Hybrid Approach):**
 
@@ -169,6 +232,28 @@ OLLAMA_EMBEDDING_MODEL=nomic-embed-text:latest
 ```
 
 **Example `.env` for OpenRouter:**
+```env
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_api_key_here
+OPENROUTER_LLM_MODEL=openai/gpt-4o-mini
+OPENROUTER_EMBEDDING_MODEL=openai/text-embedding-3-small
+```
+
+**Graph Backend Selection (Optional):**
+```env
+# Default: networkx (no installation needed)
+GRAPH_BACKEND=networkx
+
+# For better performance (3x-100x faster):
+# pip install rustworkx
+GRAPH_BACKEND=rustworkx
+
+# For persistent storage (production):
+# Experimental - Not fully tested (see docs/FALKORDB_POC_README.md)
+# Linux/macOS: pip install falkordblite
+# Windows: pip install falkordb redis (see docs/WINDOWS_FALKORDB_SETUP.md)
+# GRAPH_BACKEND=falkordb  # ⚠️ Experimental - Use at your own risk
+```
 
 **Researcher Agent & Content Extraction (Optional):**
 
@@ -219,13 +304,6 @@ pip install "unstructured[pdf]"
 pip install unstructured
 pip install pdfminer.six  # Required for PDF extraction
 ```
-```env
-LLM_PROVIDER=openrouter
-OPENROUTER_API_KEY=your_api_key_here
-OPENROUTER_LLM_MODEL=openai/gpt-4o-mini
-OPENROUTER_EMBEDDING_MODEL=openai/text-embedding-3-small
-```
-
 **Optional HTTP Server (for external tools):**
 ```env
 TCP_SERVER_ENABLED=true
@@ -278,7 +356,7 @@ python mcp_server.py
 13. **`get_graph`** - Returns the full graph snapshot (nodes + edges) for visualization
 
 #### Memory Maintenance
-14. **`run_memory_enzymes`** - Runs memory maintenance: prunes old/weak links and zombie nodes, suggests new relations, digests overcrowded nodes. Automatically optimizes graph structure
+14. **`run_memory_enzymes`** - Runs comprehensive memory maintenance: prunes old/weak links and zombie nodes, merges duplicates, validates and fixes edges, removes self-loops, links isolated nodes, normalizes keywords, calculates quality scores, validates notes, removes low-quality content, refines summaries, repairs corrupted nodes, suggests new relations, and digests overcrowded nodes. Automatically optimizes graph structure with 14+ maintenance operations
 
 #### Research & Web Integration
 15. **`research_and_store`** - Performs deep web research on a query and stores findings as atomic notes. Uses Google Search API (if configured) or DuckDuckGo HTTP search, extracts content with Jina Reader (local Docker or cloud), and processes PDFs with Unstructured. Automatically creates notes with metadata, keywords, and tags.
@@ -451,20 +529,15 @@ cat data/events.jsonl | jq .
 
 ### 📊 Visual Diagrams
 
-Zusätzliche SVG-Diagramme finden Sie im `docs/` Verzeichnis:
-- `a-mem-system-architecture.svg` - System-Architektur Übersicht
-- `a-mem-class-diagram.svg` - Klassen-Diagramm
-- `a-mem-dataflow.svg` - Datenfluss-Diagramm
-- `a-mem-storage-architecture.svg` - Storage-Architektur Detail
-- `a-mem-memory-enzymes.svg` - Memory Enzymes Workflow
-- `a-mem-researcher-agent.svg` - Researcher Agent Workflow
-- `a-mem-type-classification.svg` - Type Classification System
-- `a-mem-mcp-tools.svg` - MCP Tools Übersicht
-- `a-mem-mindmap.svg` - Mindmap der Komponenten
-- `a-mem-journey.svg` - User Journey
-- `a-mem-er-diagram.svg` - Entity-Relationship Diagramm
-- `a-mem-state-diagram.svg` - State Diagram
-- `a-mem-timeline.svg` - Timeline Visualisierung
+Aktualisierte Mermaid-basierte SVG-Diagramme finden Sie im `docs/` Verzeichnis:
+- `a-mem-system-architecture.svg` - **System-Architektur Übersicht** (Multi-Backend Support, 14+ Enzyme Operations)
+- `a-mem-storage-architecture.svg` - **Storage-Architektur Detail** (NetworkX, RustworkX, FalkorDB Backends - FalkorDB experimental)
+- `a-mem-memory-enzymes.svg` - **Memory Enzymes Workflow** (14+ Maintenance Operations)
+- `a-mem-mcp-tools.svg` - **MCP Tools Übersicht** (15 Tools kategorisiert)
+- `a-mem-type-classification.svg` - **Type Classification System** (6 Types + Priority Calculation)
+
+**Vollständige Mermaid-Diagramme** (inkl. Sequence Diagrams, Workflows) finden Sie in:
+- `docs/ARCHITECTURE_DIAGRAM.md` - Vollständige Architektur-Darstellung mit allen Diagrammen
 ## 🧪 Tests
 
 ```bash
@@ -593,13 +666,17 @@ alias amem="python ~/path/to/a-mem-mcp-server/tools/amem_stats.py"
 ✅ **All Tests Passed** (24/24 tests)  
 ✅ **Modular Structure**  
 ✅ **Multi-Provider Support** (Ollama + OpenRouter)  
-✅ **MCP Server Integration** (14 Tools)  
+✅ **MCP Server Integration** (15 Tools)  
 ✅ **Memory Reset & Management Tools**  
 ✅ **Type Classification & Priority Scoring**  
 ✅ **Event Logging & Audit Trail**  
 ✅ **Memory Enzymes (Autonomous Graph Maintenance)**  
 ✅ **Automatic Scheduler (Hourly Maintenance)**  
 ✅ **HTTP Server** (optional, for external tools like `extract_graph.py`)
+✅ **Graph Backend Selection** (NetworkX, RustworkX, FalkorDB - experimental)
+✅ **Parameter Validation** (automatic validation of all MCP tool parameters)
+✅ **Safe Graph Wrapper** (edge case handling and data sanitization)
+⚠️ **Windows-FalkorDB Support** (experimental, dedicated adapter for Windows users - not fully tested)
 
 ## 📄 License
 

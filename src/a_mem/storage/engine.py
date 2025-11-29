@@ -18,6 +18,38 @@ from pathlib import Path
 from ..config import settings
 from ..models.note import AtomicNote, NoteRelation
 
+# Import RustworkXGraphStore if available
+try:
+    from .rustworkx_store import RustworkXGraphStore, RUSTWORKX_AVAILABLE
+except ImportError:
+    RustworkXGraphStore = None
+    RUSTWORKX_AVAILABLE = False
+
+# Import SafeGraphStore wrapper
+try:
+    from .safe_graph_wrapper import SafeGraphStore
+    SAFE_WRAPPER_AVAILABLE = True
+except ImportError:
+    SafeGraphStore = None
+    SAFE_WRAPPER_AVAILABLE = False
+
+# Import FalkorDBGraphStore if available
+try:
+    from .falkordb_store import FalkorDBGraphStore, FALKORDB_AVAILABLE
+except ImportError:
+    FalkorDBGraphStore = None
+    FALKORDB_AVAILABLE = False
+
+# Import Windows adapter if on Windows
+FALKORDB_WINDOWS_AVAILABLE = False
+FalkorDBGraphStoreWindows = None
+if sys.platform == 'win32':
+    try:
+        from .falkordb_store_windows import FalkorDBGraphStoreWindows
+        FALKORDB_WINDOWS_AVAILABLE = True
+    except ImportError:
+        pass
+
 # Log file path
 LOG_FILE = settings.DATA_DIR / "graph_save.log"
 
@@ -354,14 +386,94 @@ class VectorStore:
                 print(f"Critical: Could not recreate collection: {e2}", file=sys.stderr)
                 raise
 
+def create_graph_store():
+    """
+    Factory function to create the appropriate GraphStore implementation.
+    
+    Returns:
+        GraphStore instance (NetworkX, RustworkX, FalkorDBLite, or FalkorDB-Windows based on config and platform)
+    """
+    backend = settings.GRAPH_BACKEND.lower()
+    
+    if backend == "rustworkx":
+        # RustworkX (fastest option, Windows-compatible)
+        if RUSTWORKX_AVAILABLE and RustworkXGraphStore is not None:
+            try:
+                _write_log("[GraphStore] Using RustworkX (GraphML persistence)")
+                rustworkx_store = RustworkXGraphStore()
+                # Wrap with SafeGraphStore for edge case handling
+                if SAFE_WRAPPER_AVAILABLE and SafeGraphStore is not None:
+                    _write_log("[GraphStore] Wrapping with SafeGraphStore for edge case protection")
+                    return SafeGraphStore(rustworkx_store)
+                else:
+                    return rustworkx_store
+            except Exception as e:
+                _write_log(f"[GraphStore] RustworkX initialization failed: {e}")
+                _write_log("[GraphStore] Falling back to NetworkX")
+                return GraphStore()
+        else:
+            _write_log(
+                "Warning: RustworkX not available. Install with: pip install rustworkx",
+                file=sys.stderr
+            )
+            _write_log("[GraphStore] Falling back to NetworkX")
+            return GraphStore()
+    
+    elif backend == "falkordb":
+        # On Windows, try Windows adapter first (uses external Redis)
+        if sys.platform == 'win32' and FALKORDB_WINDOWS_AVAILABLE and FalkorDBGraphStoreWindows is not None:
+            try:
+                _write_log("[GraphStore] Using FalkorDB Windows adapter (external Redis)")
+                return FalkorDBGraphStoreWindows()
+            except Exception as e:
+                _write_log(f"[GraphStore] Windows adapter failed: {e}")
+                _write_log("[GraphStore] Make sure Redis is running with FalkorDB module!")
+                # Fall through to try FalkorDBLite or NetworkX
+        
+        # Try FalkorDBLite (Linux/macOS or if Windows adapter failed)
+        if FALKORDB_AVAILABLE and FalkorDBGraphStore is not None:
+            try:
+                _write_log("[GraphStore] Using FalkorDBLite (embedded Redis)")
+                return FalkorDBGraphStore()
+            except Exception as e:
+                _write_log(f"[GraphStore] FalkorDBLite initialization failed: {e}")
+                # Fall through to NetworkX
+        
+        # Fallback to NetworkX
+        _write_log(
+            "Warning: FalkorDB not available. Falling back to NetworkX.",
+            file=sys.stderr
+        )
+        if sys.platform == 'win32':
+            _write_log(
+                "On Windows, install: pip install falkordb redis (and run Redis with FalkorDB module)",
+                file=sys.stderr
+            )
+        else:
+            _write_log(
+                "Install with: pip install falkordblite",
+                file=sys.stderr
+            )
+        return GraphStore()
+    else:
+        # Default: NetworkX
+        return GraphStore()
+
+
 class StorageManager:
     """Facade for vector and graph storage."""
     def __init__(self):
         self.vector = VectorStore()
-        self.graph = GraphStore()
+        self.graph = create_graph_store()
     
     def get_note(self, note_id: str) -> Optional[AtomicNote]:
-        node_data = self.graph.graph.nodes.get(note_id)
+        # Use get_node() if available (FalkorDB), otherwise fallback to direct access
+        if hasattr(self.graph, 'get_node'):
+            node_data = self.graph.get_node(note_id)
+        else:
+            # NetworkX fallback
+            node_data = self.graph.graph.nodes.get(note_id) if hasattr(self.graph, 'graph') else None
+        
         if node_data:
             # Ensure Pydantic validation, in case fields are missing
             try:
@@ -374,7 +486,13 @@ class StorageManager:
     def delete_note(self, note_id: str) -> bool:
         """Deletes a note from Graph and Vector Store."""
         # Check if note exists
-        if note_id not in self.graph.graph:
+        if hasattr(self.graph, 'has_node'):
+            exists = self.graph.has_node(note_id)
+        else:
+            # NetworkX fallback
+            exists = note_id in self.graph.graph if hasattr(self.graph, 'graph') else False
+        
+        if not exists:
             return False
         
         try:

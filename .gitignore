@@ -39,7 +39,9 @@ wheels/
 data/
 *.log
 .amem_stats_cache.json
+graph_save.log
 
-# Test files (keep important ones, ignore temporary)
-tools/test_*.py
-!tools/test_a_mem.py
+# Test files and results
+tests/test_results_*.json
+tests/*_results.json
+*.test.json

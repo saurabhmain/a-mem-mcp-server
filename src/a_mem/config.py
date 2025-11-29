@@ -85,6 +85,9 @@ class Config:
     
     # Cache file for amem_stats --diff
     AMEM_STATS_CACHE_FILE = DATA_DIR / "amem_stats_cache.json"
+    
+    # Graph Backend Selection (networkx, rustworkx, or falkordb)
+    GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "networkx").lower()  # "networkx", "rustworkx", or "falkordb"
 
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

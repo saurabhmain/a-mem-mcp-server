@@ -4,7 +4,9 @@
 
 The A-MEM MCP Server provides tools for the Agentic Memory System.
 
-## 🛠️ Available Tools
+## 🛠️ Available Tools (15 Total)
+
+### Core Memory Operations
 
 ### 1. `create_atomic_note`
 Stores a new piece of information in the memory system.
@@ -180,6 +182,22 @@ OPENROUTER_LLM_MODEL=openai/gpt-4o-mini
 OPENROUTER_EMBEDDING_MODEL=openai/text-embedding-3-small
 ```
 
+**Graph Backend Selection:**
+```env
+# Default: NetworkX (no installation needed)
+GRAPH_BACKEND=networkx
+
+# For better performance (3x-100x faster):
+# pip install rustworkx
+GRAPH_BACKEND=rustworkx
+
+# For persistent storage (production):
+# Experimental - Not fully tested (see docs/FALKORDB_POC_README.md)
+# Linux/macOS: pip install falkordblite
+# Windows: pip install falkordb redis (see docs/WINDOWS_FALKORDB_SETUP.md)
+# GRAPH_BACKEND=falkordb  # ⚠️ Experimental - Use at your own risk
+```
+
 ### Ollama Setup (when LLM_PROVIDER=ollama)
 
 Make sure Ollama is running and both models are installed:
@@ -240,7 +258,12 @@ reset_memory()
 ## ✅ Status
 
 The MCP Server is fully implemented and uses:
-- ✅ Local Ollama (qwen3:4b for LLM, nomic-embed-text for embeddings)
+- ✅ Local Ollama (qwen3:4b for LLM, nomic-embed-text for embeddings) or OpenRouter (cloud)
 - ✅ Async I/O for performance
 - ✅ Memory Evolution in background
 - ✅ Graph-based linking
+- ✅ **15 MCP Tools** (Core Memory, Note Management, Relations, Graph Operations, Maintenance, Research)
+- ✅ **Graph Backend Selection** (NetworkX, RustworkX, FalkorDB - experimental)
+- ✅ **Parameter Validation** (automatic validation of all tool parameters)
+- ✅ **Safe Graph Wrapper** (edge case handling and data sanitization)
+- ✅ **Advanced Memory Enzymes** (14+ maintenance operations: duplicate merging, edge validation, isolated node linking, keyword normalization, quality scoring, note validation, corrupted node repair, and more)

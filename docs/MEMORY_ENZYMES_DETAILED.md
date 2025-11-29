@@ -19,13 +19,23 @@
 
 ### Hauptmerkmale
 
+**14+ Maintenance Operations:**
+
 - ✅ **Automatischer Scheduler**: Läuft stündlich im Hintergrund
+- ✅ **Corrupted Node Repairer**: Repariert korrupte Nodes (z.B. 'None' Strings)
 - ✅ **Link Pruner**: Entfernt alte/schwache Links und Zombie Nodes
+- ✅ **Zombie Node Remover**: Entfernt Nodes ohne Content
+- ✅ **Low Quality Note Remover**: Entfernt irrelevante Notes (CAPTCHA, Fehlerseiten)
+- ✅ **Self-Loop Remover**: Entfernt Self-Referencing Edges
+- ✅ **Edge Validator**: Validiert und korrigiert Edges (Reasoning, Types, schwache Edges)
+- ✅ **Duplicate Merger**: Findet und merged Duplikate (exakt und semantisch)
+- ✅ **Keyword Normalizer**: Normalisiert und bereinigt Keywords
+- ✅ **Note Validator**: Validiert und korrigiert Notes (Content, Summary, Keywords, Tags)
+- ✅ **Quality Score Calculator**: Berechnet Quality-Scores für Notes
+- ✅ **Summary Refiner**: Macht ähnliche Summarys spezifischer
 - ✅ **Relation Suggester**: Findet neue semantische Verbindungen
-- ✅ **Summary Digester**: Komprimiert überfüllte Nodes
-- ✅ **Note Validator**: Validiert und korrigiert Notes
-- ✅ **Duplicate Merger**: Findet und merged Duplikate
 - ✅ **Isolated Node Linker**: Verlinkt isolierte Nodes automatisch
+- ✅ **Summary Digester**: Komprimiert überfüllte Nodes
 
 ---
 
@@ -46,6 +56,16 @@
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
 │  │ Note         │  │ Duplicate    │  │ Isolated    │    │
 │  │ Validator     │  │ Merger      │  │ Node Linker │    │
+│  └──────────────┘  └──────────────┘  └──────────────┘    │
+│                                                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
+│  │ Edge          │  │ Keyword      │  │ Quality     │    │
+│  │ Validator     │  │ Normalizer   │  │ Calculator  │    │
+│  └──────────────┘  └──────────────┘  └──────────────┘    │
+│                                                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
+│  │ Corrupted     │  │ Low Quality  │  │ Self-Loop   │    │
+│  │ Node Repairer │  │ Note Remover │  │ Remover      │    │
 │  └──────────────┘  └──────────────┘  └──────────────┘    │
 │                                                               │
 │  ┌──────────────────────────────────────────────────────┐  │
@@ -322,6 +342,27 @@ elif name == "run_memory_enzymes":
 
 ## Enzyme-Funktionen
 
+### 0. Corrupted Node Repairer (`repair_corrupted_nodes`)
+
+**Zweck:** Repariert korrupte Nodes (z.B. `created_at = 'None'` String statt datetime, `keywords = 'None'` statt Liste).
+
+**Parameter:**
+- `graph` (GraphStore): Graph-Instanz
+
+**Rückgabe:** Anzahl reparierte Nodes
+
+**Reparaturen:**
+- `created_at` als String 'None' oder leer → Setze auf aktuelles Datum
+- `keywords` als String 'None' oder ungültiges JSON → Setze auf leere Liste
+- `tags` als String 'None' oder ungültiges JSON → Setze auf leere Liste
+- Andere korrupte Felder werden ebenfalls repariert
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 2212-2310
+
+**Hinweis:** Wird als **erstes** ausgeführt, bevor alle anderen Enzyme-Operationen.
+
+---
+
 ### 1. Link Pruner (`prune_links`)
 
 **Zweck:** Entfernt alte/schwache Links und Zombie Nodes.
@@ -400,7 +441,84 @@ def prune_links(
     return len(to_remove)
 ```
 
-### 2. Zombie Node Remover (`remove_zombie_nodes`)
+### 1.5. Low Quality Note Remover (`remove_low_quality_notes`)
+
+**Zweck:** Entfernt Notes mit irrelevantem oder fehlerhaftem Content.
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+- `llm_service` (Optional[LLMService]): Optional LLM Service für Content-Validierung
+
+**Rückgabe:** Anzahl entfernte Notes
+
+**Erkannte Patterns:**
+- CAPTCHA-Content
+- Fehlerseiten/Redirect-Seiten (403, 404, blocked, denied)
+- Leere/ungültige Content (< 50 Zeichen)
+- Irrelevante Content-Patterns (cookie consent, privacy policy, etc.)
+- Researcher-Agent Notes mit problematischem Content
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 1798-1913
+
+---
+
+### 1.6. Self-Loop Remover (`remove_self_loops`)
+
+**Zweck:** Entfernt Self-Loops (Edges von einem Node zu sich selbst).
+
+**Parameter:**
+- `graph` (GraphStore): Graph-Instanz
+
+**Rückgabe:** Anzahl entfernte Self-Loops
+
+**Code:**
+```python
+def remove_self_loops(graph: GraphStore) -> int:
+    """
+    Entfernt Self-Loops (Edges von einem Node zu sich selbst).
+    """
+    self_loops = []
+    
+    for node_id in graph.graph.nodes():
+        if graph.graph.has_edge(node_id, node_id):
+            self_loops.append(node_id)
+            graph.graph.remove_edge(node_id, node_id)
+    
+    return len(self_loops)
+```
+
+---
+
+### 1.7. Edge Validator (`validate_and_fix_edges`)
+
+**Zweck:** Validiert und korrigiert Edges (Reasoning, Types, entfernt schwache Edges).
+
+**Parameter:**
+- `graph` (GraphStore): Graph-Instanz
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `llm_service` (Optional[LLMService]): Optional LLM Service für Reasoning-Generierung
+- `min_weight_for_reasoning` (float): Minimale Weight für Edges die Reasoning benötigen (default: 0.65)
+- `ignore_flags` (bool): Ignoriere Flags (default: False)
+
+**Rückgabe:** Dict mit Ergebnissen:
+- `edges_removed`: Anzahl entfernte Edges
+- `reasonings_added`: Anzahl ergänzte Reasoning-Felder
+- `types_standardized`: Anzahl standardisierte Relation Types
+
+**Validierungen:**
+1. **Standardisiert Relation Types**: `similar_to` → `relates_to`
+2. **Prüft Reasoning-Feld**: 
+   - Edges mit hohem Weight aber negativem Reasoning → entfernen
+   - Edges mit Weight aber ohne Reasoning → Reasoning generieren oder entfernen
+3. **Entfernt widersprüchliche Edges**: Reasoning sagt "keine Beziehung" aber Weight ist hoch
+4. **Entfernt schwache Edges**: Weight < threshold und kein Reasoning
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 592-773
+
+---
+
+### 2. Zombie Node Remover (`prune_zombie_nodes`)
 
 **Zweck:** Entfernt Nodes ohne Content (gelöschte/leere Nodes).
 
@@ -626,6 +744,67 @@ Zusammenfassung:"""
         return None
 ```
 
+### 5.5. Keyword Normalizer (`normalize_and_clean_keywords`)
+
+**Zweck:** Normalisiert und bereinigt Keywords.
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+- `llm_service` (Optional[LLMService]): Optional LLM Service für Keyword-Korrektur
+- `max_keywords` (int): Maximale Anzahl Keywords pro Note (default: 7)
+- `ignore_flags` (bool): Ignoriere Flags (default: False)
+
+**Rückgabe:** Dict mit Ergebnissen:
+- `keywords_normalized`: Anzahl normalisierte Keywords
+- `keywords_removed`: Anzahl entfernte Keywords
+- `keywords_corrected`: Anzahl korrigierte Keywords
+
+**Normalisierungen:**
+1. **Normalisiert Groß-/Kleinschreibung**: 
+   - Akronyme (MCP, API, IDE) → UPPERCASE
+   - Programmiersprachen (Python, JavaScript) → Capitalize
+   - Mehrwort-Keywords → Title Case
+2. **Entfernt generische Keywords**: "befehl", "skript", "tool", "reference", etc.
+3. **Korrigiert falsche Keyword-Zuordnungen**: Via LLM wenn Keywords nicht zum Content passen
+4. **Reduziert auf max_keywords**: Behält die wichtigsten/spezifischsten
+5. **Entfernt Duplikate**: Case-insensitive
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 978-1141
+
+---
+
+### 5.6. Quality Score Calculator (`calculate_quality_score`)
+
+**Zweck:** Berechnet einen Quality-Score für eine Note (0.0 - 1.0).
+
+**Parameter:**
+- `note` (AtomicNote): Note
+- `graph` (GraphStore): Graph-Instanz
+- `node_id` (str): ID der Note
+
+**Rückgabe:** Dict mit:
+- `score`: Gesamt-Score (0.0 - 1.0)
+- `content_score`: Content-Qualität (0.0 - 1.0)
+- `summary_score`: Summary-Qualität (0.0 - 1.0)
+- `keywords_score`: Keywords-Qualität (0.0 - 1.0)
+- `tags_score`: Tags-Qualität (0.0 - 1.0)
+- `linking_score`: Verlinkungsgrad (0.0 - 1.0)
+- `metadata_score`: Metadata-Vollständigkeit (0.0 - 1.0)
+- `issues`: Liste von Quality-Issues
+
+**Bewertungskriterien:**
+- **Content-Score** (25%): Länge, Vollständigkeit
+- **Summary-Score** (20%): Länge, Spezifität
+- **Keywords-Score** (15%): Anzahl (2-7 optimal), Relevanz
+- **Tags-Score** (10%): Anzahl (1-5 optimal)
+- **Linking-Score** (15%): Anzahl Connections
+- **Metadata-Score** (15%): Vollständigkeit
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 1143-1242
+
+---
+
 ### 6. Note Validator (`validate_notes`)
 
 **Zweck:** Validiert Notes und korrigiert fehlende/ungültige Felder.
@@ -662,7 +841,13 @@ Zusammenfassung:"""
 
 **Rückgabe:** Anzahl verfeinerte Summarys
 
-**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 1750-1866
+**Strategie:**
+1. Findet Notes mit ähnlichen/identischen Summarys (via Embedding-Similarity)
+2. Prüft ob Content unterschiedlich ist (sonst macht Refinement keinen Sinn)
+3. Erstellt spezifischere Summarys via LLM für jede Note
+4. Speichert verfeinerte Summarys im Graph
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 1916-2070
 
 ### 8. Isolated Node Linker (`link_isolated_nodes`)
 
@@ -681,6 +866,30 @@ Zusammenfassung:"""
 **Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 614-700
 
 ### 9. Hauptfunktion (`run_memory_enzymes`)
+
+**Zweck:** Führt alle Enzyme aus in optimierter Reihenfolge.
+
+**Ausführungsreihenfolge:**
+1. **Repair Phase**: `repair_corrupted_nodes()` - Repariert korrupte Nodes
+2. **Cleanup Phase**: 
+   - `prune_links()` - Entfernt alte/schwache Links
+   - `prune_zombie_nodes()` - Entfernt Zombie Nodes
+   - `remove_low_quality_notes()` - Entfernt irrelevante Notes
+   - `remove_self_loops()` - Entfernt Self-Loops
+   - `validate_and_fix_edges()` - Validiert und korrigiert Edges
+   - `merge_duplicates()` - Merged Duplikate
+   - `normalize_and_clean_keywords()` - Normalisiert Keywords
+3. **Optimization Phase**:
+   - `validate_notes()` - Validiert Notes
+   - `refine_summaries()` - Verfeinert Summarys
+   - `suggest_relations()` - Schlägt neue Relations vor
+   - `link_isolated_nodes()` - Verlinkt isolierte Nodes
+4. **Compression Phase**:
+   - `digest_node()` - Komprimiert überfüllte Nodes
+
+**Parameter:** Siehe MCP Tool Definition (Zeilen 216-265)
+
+**Rückgabe:** Dict mit detaillierten Ergebnissen aller Operations
 
 **Zweck:** Führt alle Enzyme aus.
 
@@ -734,8 +943,14 @@ sequenceDiagram
     MCP->>Controller: call_tool()
     Controller->>Enzymes: run_memory_enzymes()
     Enzymes->>Enzymes: prune_links()
-    Enzymes->>Enzymes: remove_zombie_nodes()
+    Enzymes->>Enzymes: repair_corrupted_nodes()
+    Enzymes->>Enzymes: prune_links()
+    Enzymes->>Enzymes: prune_zombie_nodes()
+    Enzymes->>Enzymes: remove_low_quality_notes()
+    Enzymes->>Enzymes: remove_self_loops()
+    Enzymes->>Enzymes: validate_and_fix_edges()
     Enzymes->>Enzymes: merge_duplicates()
+    Enzymes->>Enzymes: normalize_and_clean_keywords()
     Enzymes->>Enzymes: validate_notes()
     Enzymes->>Enzymes: refine_summaries()
     Enzymes->>Enzymes: suggest_relations()
@@ -762,6 +977,11 @@ graph LR
     C --> C2[refine_summaries]
     C --> C3[suggest_relations]
     C --> C4[link_isolated_nodes]
+    
+    A --> E[0. Repair Phase]
+    E --> E1[repair_corrupted_nodes]
+    
+    B --> B6[normalize_keywords]
     
     A --> D[3. Compression Phase]
     D --> D1[digest_node]
@@ -874,10 +1094,22 @@ results = run_memory_enzymes(
     auto_add_suggestions=False
 )
 
+print(f"Corrupted nodes repaired: {results['corrupted_nodes_repaired']}")
 print(f"Pruned: {results['pruned_count']}")
 print(f"Zombies removed: {results['zombie_nodes_removed']}")
+print(f"Low quality notes removed: {results['low_quality_notes_removed']}")
+print(f"Self-loops removed: {results['self_loops_removed']}")
+print(f"Edges validated: {results['edges_validated']}")
+print(f"Edges removed: {results['edges_removed']}")
+print(f"Reasonings added: {results['reasonings_added']}")
+print(f"Types standardized: {results['types_standardized']}")
 print(f"Duplicates merged: {results['duplicates_merged']}")
+print(f"Keywords normalized: {results['keywords_normalized']}")
+print(f"Quality scores calculated: {results['quality_scores_calculated']}")
 print(f"Suggestions: {results['suggestions_count']}")
+print(f"Summaries refined: {results['summaries_refined']}")
+print(f"Notes validated: {results['notes_validated']}")
+print(f"Isolated nodes linked: {results['isolated_nodes_linked']}")
 ```
 
 ### Beispiel 3: Via MCP Tool
@@ -946,8 +1178,18 @@ Enzyme loggen alle wichtigen Events:
 - `ENZYME_SCHEDULER_STOPPED`: Scheduler gestoppt
 - `ENZYME_SCHEDULER_ERROR`: Fehler im Scheduler
 - `LINKS_PRUNED`: Links entfernt
+- `CORRUPTED_NODES_REPAIRED`: Korrupte Nodes repariert
 - `ZOMBIE_NODES_REMOVED`: Zombie Nodes entfernt
+- `LOW_QUALITY_NOTES_REMOVED`: Irrelevante Notes entfernt
+- `SELF_LOOPS_REMOVED`: Self-Loops entfernt
+- `EDGES_VALIDATED`: Edges validiert
+- `EDGE_REMOVED_CONTRADICTORY`: Widersprüchliche Edges entfernt
+- `EDGE_REMOVED_NO_REASONING`: Edges ohne Reasoning entfernt
+- `REASONINGS_ADDED`: Reasoning-Felder ergänzt
+- `TYPES_STANDARDIZED`: Relation Types standardisiert
 - `DUPLICATES_MERGED`: Duplikate gemerged
+- `KEYWORDS_NORMALIZED`: Keywords normalisiert
+- `QUALITY_SCORES_CALCULATED`: Quality-Scores berechnet
 - `RELATIONS_SUGGESTED`: Relationen vorgeschlagen
 - `RELATION_AUTO_ADDED`: Relation automatisch hinzugefügt
 - `SUMMARIES_REFINED`: Summarys verfeinert
@@ -962,9 +1204,22 @@ Enzyme loggen alle wichtigen Events:
   "data": {
     "results": {
       "pruned_count": 5,
+      "corrupted_nodes_repaired": 1,
+      "pruned_count": 5,
       "zombie_nodes_removed": 2,
+      "low_quality_notes_removed": 0,
+      "self_loops_removed": 1,
+      "edges_validated": 42,
+      "edges_removed": 2,
+      "reasonings_added": 3,
+      "types_standardized": 1,
       "duplicates_merged": 1,
+      "keywords_normalized": 5,
+      "quality_scores_calculated": 50,
       "suggestions_count": 3,
+      "summaries_refined": 2,
+      "notes_validated": 50,
+      "isolated_nodes_linked": 2,
       "digested_count": 0
     },
     "interval_hours": 1.0
@@ -1003,6 +1258,25 @@ Enzyme prüfen Flags und verarbeiten nur notwendige Notes.
 - [ ] Graph-Health-Scoring
 
 ---
+
+---
+
+## Vollständige Liste aller Enzyme-Operations (14+)
+
+1. **repair_corrupted_nodes** - Repariert korrupte Nodes (zuerst ausgeführt)
+2. **prune_links** - Entfernt alte/schwache Links
+3. **prune_zombie_nodes** - Entfernt Zombie Nodes
+4. **remove_low_quality_notes** - Entfernt irrelevante Notes
+5. **remove_self_loops** - Entfernt Self-Referencing Edges
+6. **validate_and_fix_edges** - Validiert und korrigiert Edges
+7. **merge_duplicates** - Merged Duplikate (exakt und semantisch)
+8. **normalize_and_clean_keywords** - Normalisiert und bereinigt Keywords
+9. **validate_notes** - Validiert und korrigiert Notes
+10. **calculate_quality_score** - Berechnet Quality-Scores (wird von anderen Enzymes genutzt)
+11. **refine_summaries** - Verfeinert ähnliche Summarys
+12. **suggest_relations** - Schlägt neue Relations vor
+13. **link_isolated_nodes** - Verlinkt isolierte Nodes
+14. **digest_node** - Komprimiert überfüllte Nodes
 
 **Letzte Aktualisierung:** 2025-11-29
 

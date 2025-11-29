@@ -69,6 +69,9 @@ def prune_links(
             continue  # Skip weitere Checks, Edge wird entfernt
         
         # CRITICAL: Zombie Node Check - Entferne Edges zu Nodes ohne Content (gelöschte Nodes)
+        # Handle None data gracefully
+        if data is None:
+            data = {}
         source_node = graph.graph.nodes[source]
         target_node = graph.graph.nodes[target]
         
@@ -207,21 +210,24 @@ def prune_zombie_nodes(graph: GraphStore) -> int:
 def merge_duplicates(
     notes: Dict[str, AtomicNote],
     graph: GraphStore,
+    llm_service: Optional[LLMService] = None,
     content_similarity_threshold: float = 0.98
 ) -> int:
     """
     Findet und merged Duplikate (Notes mit identischem oder sehr ähnlichem Content).
     
     Strategie:
-    1. Finde Notes mit identischem Content (exakt oder sehr ähnlich)
-    2. Behalte die beste Note (mehr Metadaten, bessere Summary, mehr Verbindungen)
-    3. Leite alle Edges von Duplikaten auf die behaltene Note um
-    4. Lösche Duplikate
+    1. Finde Notes mit identischem Content (exakt)
+    2. Finde Notes mit semantisch ähnlichem Content (via Embeddings, wenn llm_service verfügbar)
+    3. Bei exakten Duplikaten: Behalte beste Note, lösche andere
+    4. Bei semantischen Duplikaten: Intelligentes Merging (Content zusammenführen)
+    5. Leite alle Edges von Duplikaten auf die behaltene Note um
     
     Args:
         notes: Dict von note_id -> AtomicNote
         graph: GraphStore Instanz
-        content_similarity_threshold: Minimale Content-Similarity für Duplikat-Erkennung (default: 0.98)
+        llm_service: Optional LLMService für Embedding-Berechnung (für semantische Duplikate)
+        content_similarity_threshold: Minimale Content-Similarity für semantische Duplikat-Erkennung (default: 0.98)
     
     Returns:
         Anzahl gemergte Duplikate
@@ -233,7 +239,7 @@ def merge_duplicates(
     note_ids = list(notes.keys())
     to_remove = set()  # IDs von Notes die gelöscht werden sollen
     
-    # Finde Duplikate (identischer Content)
+    # Phase 1: Exakte Duplikate (identischer Content)
     for i in range(len(note_ids)):
         if note_ids[i] in to_remove:
             continue
@@ -248,7 +254,6 @@ def merge_duplicates(
             # Exakte Content-Übereinstimmung
             if note_a.content.strip() == note_b.content.strip() and note_a.content.strip():
                 # Entscheide welche Note behalten wird
-                # Kriterien: Mehr Metadaten, bessere Summary, mehr Verbindungen
                 keep_id, remove_id = _choose_best_note(
                     note_ids[i], note_ids[j], note_a, note_b, graph
                 )
@@ -267,6 +272,137 @@ def merge_duplicates(
                         "reason": "identical_content"
                     })
     
+    # Phase 1.5: Identische Summaries (schneller Check, kein Embedding nötig)
+    for i in range(len(note_ids)):
+        if note_ids[i] in to_remove:
+            continue
+            
+        for j in range(i + 1, len(note_ids)):
+            if note_ids[j] in to_remove:
+                continue
+            
+            note_a = notes[note_ids[i]]
+            note_b = notes[note_ids[j]]
+            
+            # Identische Summary-Übereinstimmung (und gleiche Quelle wenn vorhanden)
+            summary_a = (note_a.contextual_summary or "").strip()
+            summary_b = (note_b.contextual_summary or "").strip()
+            
+            if summary_a and summary_a == summary_b:
+                # Zusätzliche Prüfung: Gleiche Quelle oder sehr ähnlicher Content
+                source_a = note_a.metadata.get("source_url", "") if note_a.metadata else ""
+                source_b = note_b.metadata.get("source_url", "") if note_b.metadata else ""
+                
+                # Wenn gleiche Quelle ODER sehr ähnlicher Content (erste 100 Zeichen)
+                if source_a == source_b or (len(note_a.content) > 50 and len(note_b.content) > 50 and 
+                                            note_a.content[:100] == note_b.content[:100]):
+                    # Intelligentes Merging
+                    keep_id, remove_id = _choose_best_note(
+                        note_ids[i], note_ids[j], note_a, note_b, graph
+                    )
+                    
+                    if keep_id and remove_id:
+                        # Merge Content intelligent
+                        merged_note = _merge_note_content(
+                            notes[keep_id], notes[remove_id]
+                        )
+                        
+                        # Aktualisiere Note im Graph
+                        if keep_id in graph.graph.nodes:
+                            node_data = graph.graph.nodes[keep_id]
+                            node_data.update({
+                                "content": merged_note.content,
+                                "contextual_summary": merged_note.contextual_summary,
+                                "keywords": list(set(merged_note.keywords)),
+                                "tags": list(set(merged_note.tags))
+                            })
+                        
+                        # Leite Edges um
+                        _redirect_edges(graph, remove_id, keep_id)
+                        
+                        # Markiere zum Löschen
+                        to_remove.add(remove_id)
+                        merged_count += 1
+                        
+                        log_event("DUPLICATE_MERGED", {
+                            "kept": keep_id,
+                            "removed": remove_id,
+                            "reason": "identical_summary",
+                            "summary": summary_a[:50] + "..." if len(summary_a) > 50 else summary_a
+                        })
+    
+    # Phase 2: Semantische Duplikate (via Embeddings, wenn llm_service verfügbar)
+    if llm_service and len(notes) >= 2:
+        # Berechne Embeddings für alle Notes (einmalig)
+        content_embeddings = {}
+        for note_id in note_ids:
+            if note_id in to_remove:
+                continue
+            note = notes[note_id]
+            try:
+                # Verwende Content + Summary für Embedding
+                text_for_embedding = f"{note.content} {note.contextual_summary or ''}"
+                embedding = llm_service.get_embedding(text_for_embedding)
+                content_embeddings[note_id] = embedding
+            except Exception as e:
+                log_debug(f"Error computing embedding for {note_id} in merge_duplicates: {e}")
+                continue
+        
+        # Finde semantische Duplikate
+        for i in range(len(note_ids)):
+            if note_ids[i] in to_remove or note_ids[i] not in content_embeddings:
+                continue
+                
+            for j in range(i + 1, len(note_ids)):
+                if note_ids[j] in to_remove or note_ids[j] not in content_embeddings:
+                    continue
+                
+                note_a = notes[note_ids[i]]
+                note_b = notes[note_ids[j]]
+                
+                # Berechne Similarity
+                similarity = cosine_similarity(
+                    content_embeddings[note_ids[i]],
+                    content_embeddings[note_ids[j]]
+                )
+                
+                # Prüfe ob semantisches Duplikat
+                if similarity >= content_similarity_threshold:
+                    # Intelligentes Merging statt einfachem Löschen
+                    keep_id, remove_id = _choose_best_note(
+                        note_ids[i], note_ids[j], note_a, note_b, graph
+                    )
+                    
+                    if keep_id and remove_id:
+                        # Merge Content intelligent
+                        merged_note = _merge_note_content(
+                            notes[keep_id], notes[remove_id]
+                        )
+                        
+                        # Aktualisiere Note im Graph
+                        if keep_id in graph.graph.nodes:
+                            node_data = graph.graph.nodes[keep_id]
+                            node_data.update({
+                                "content": merged_note.content,
+                                "contextual_summary": merged_note.contextual_summary,
+                                "keywords": list(set(merged_note.keywords)),
+                                "tags": list(set(merged_note.tags))
+                            })
+                        
+                        # Leite Edges um
+                        _redirect_edges(graph, remove_id, keep_id)
+                        
+                        # Markiere zum Löschen
+                        to_remove.add(remove_id)
+                        merged_count += 1
+                        
+                        log_event("DUPLICATE_MERGED", {
+                            "kept": keep_id,
+                            "removed": remove_id,
+                            "reason": "semantic_similarity",
+                            "similarity": similarity
+                        })
+    
     # Entferne Duplikate
     for node_id in to_remove:
         if node_id in graph.graph.nodes:
@@ -279,6 +415,81 @@ def merge_duplicates(
         })
     
     return merged_count
+
+
+def _merge_note_content(note_a: AtomicNote, note_b: AtomicNote) -> AtomicNote:
+    """
+    Merged zwei Notes intelligent: Kombiniert Content, Summary, Keywords und Tags.
+    
+    Strategie:
+    - Content: Kombiniere beide, entferne Duplikate
+    - Summary: Nimm die längere/detailliertere
+    - Keywords: Vereinige beide Sets
+    - Tags: Vereinige beide Sets
+    - Metadata: Kombiniere beide (keine Duplikate)
+    
+    Args:
+        note_a: Erste Note (wird als Basis verwendet)
+        note_b: Zweite Note (wird in note_a integriert)
+    
+    Returns:
+        Gemergte Note (basierend auf note_a)
+    """
+    # Content: Kombiniere beide, entferne identische Absätze
+    content_a = note_a.content.strip()
+    content_b = note_b.content.strip()
+    
+    # Teile Content in Absätze
+    paragraphs_a = [p.strip() for p in content_a.split('\n\n') if p.strip()]
+    paragraphs_b = [p.strip() for p in content_b.split('\n\n') if p.strip()]
+    
+    # Kombiniere, entferne Duplikate
+    merged_paragraphs = paragraphs_a.copy()
+    for para_b in paragraphs_b:
+        # Prüfe ob Absatz bereits vorhanden (exakt oder sehr ähnlich)
+        is_duplicate = False
+        for para_a in paragraphs_a:
+            # Exakte Übereinstimmung oder sehr ähnlich (gleiche Länge, ähnlicher Anfang)
+            if para_b == para_a or (len(para_b) > 50 and para_b[:50] == para_a[:50]):
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            merged_paragraphs.append(para_b)
+    
+    merged_content = '\n\n'.join(merged_paragraphs)
+    
+    # Summary: Nimm die längere/detailliertere
+    summary_a = note_a.contextual_summary or ""
+    summary_b = note_b.contextual_summary or ""
+    merged_summary = summary_a if len(summary_a) >= len(summary_b) else summary_b
+    
+    # Keywords: Vereinige beide Sets
+    merged_keywords = list(set(note_a.keywords + note_b.keywords))
+    
+    # Tags: Vereinige beide Sets
+    merged_tags = list(set(note_a.tags + note_b.tags))
+    
+    # Metadata: Kombiniere beide (note_a als Basis)
+    merged_metadata = note_a.metadata.copy() if note_a.metadata else {}
+    if note_b.metadata:
+        for key, value in note_b.metadata.items():
+            # Überschreibe nur wenn key nicht existiert oder value informativer ist
+            if key not in merged_metadata or (isinstance(value, str) and len(str(value)) > len(str(merged_metadata.get(key, "")))):
+                merged_metadata[key] = value
+    
+    # Erstelle gemergte Note (basierend auf note_a)
+    merged_note = AtomicNote(
+        id=note_a.id,
+        content=merged_content,
+        contextual_summary=merged_summary,
+        keywords=merged_keywords,
+        tags=merged_tags,
+        created_at=note_a.created_at,  # Behalte ursprüngliches created_at
+        type=note_a.type,
+        metadata=merged_metadata
+    )
+    
+    return merged_note
 
 
 def _choose_best_note(
@@ -412,6 +623,9 @@ def validate_and_fix_edges(
     to_update = []
     
     for source, target, data in graph.graph.edges(data=True):
+        # Handle None data gracefully
+        if data is None:
+            data = {}
         if source not in graph.graph.nodes or target not in graph.graph.nodes:
             continue
         
@@ -1189,6 +1403,9 @@ def validate_notes(
             needs_correction = True
         
         # Prüfe Summary (mit Flag-Check)
+        # Handle None metadata gracefully
+        if metadata is None:
+            metadata = {}
         summary_flag = metadata.get("summary_validated_at")
         should_validate_summary = ignore_flags or _is_flag_too_old(summary_flag, max_flag_age_days)
         
@@ -1273,6 +1490,9 @@ Wenn NEIN, gib einen besseren Summary (max 100 Zeichen) zurück."""
                     graph.graph.nodes[node_id]["metadata"] = metadata
         
         # Prüfe Keywords (mit Flag-Check)
+        # Handle None metadata gracefully (metadata might have been reassigned)
+        if metadata is None:
+            metadata = {}
         keywords_flag = metadata.get("keywords_validated_at")
         should_validate_keywords = ignore_flags or _is_flag_too_old(keywords_flag, max_flag_age_days)
         
@@ -1363,6 +1583,9 @@ Wenn NEIN, gib eine komma-separierte Liste mit 3-5 besseren Keywords zurück."""
                     graph.graph.nodes[node_id]["metadata"] = metadata
         
         # Prüfe Tags (mit Flag-Check)
+        # Handle None metadata gracefully (metadata might have been reassigned)
+        if metadata is None:
+            metadata = {}
         tags_flag = metadata.get("tags_validated_at")
         should_validate_tags = ignore_flags or _is_flag_too_old(tags_flag, max_flag_age_days)
         
@@ -1986,6 +2209,273 @@ Zusammenfassung:"""
         return None
 
 
+def repair_corrupted_nodes(graph: GraphStore) -> int:
+    """
+    Repariert korrupte Nodes (z.B. created_at = 'None' String statt datetime).
+    
+    Args:
+        graph: GraphStore Instanz
+    
+    Returns:
+        Anzahl reparierte Nodes
+    """
+    repaired_count = 0
+    
+    for node_id in list(graph.graph.nodes()):
+        try:
+            node_data = graph.graph.nodes[node_id]
+            # Handle None node_data gracefully
+            if node_data is None:
+                node_data = {}
+            
+            needs_repair = False
+            repairs = {}
+            
+            # Check for corrupted created_at (string 'None' or empty string)
+            if 'created_at' in node_data:
+                created_at_val = node_data['created_at']
+                if isinstance(created_at_val, str):
+                    # Handle 'None' string case
+                    if created_at_val.lower() == 'none' or created_at_val == '':
+                        needs_repair = True
+                        repairs['created_at'] = datetime.utcnow().isoformat()
+                    else:
+                        # Try to parse as ISO string
+                        try:
+                            datetime.fromisoformat(created_at_val)
+                        except:
+                            # Invalid format - repair it
+                            needs_repair = True
+                            repairs['created_at'] = datetime.utcnow().isoformat()
+                elif created_at_val is None:
+                    # Handle None value
+                    needs_repair = True
+                    repairs['created_at'] = datetime.utcnow().isoformat()
+            
+            # Check for corrupted keywords (should be list, not 'None' string)
+            if 'keywords' in node_data:
+                keywords_val = node_data['keywords']
+                if isinstance(keywords_val, str):
+                    if keywords_val.lower() == 'none' or keywords_val == '':
+                        needs_repair = True
+                        repairs['keywords'] = []
+                    else:
+                        # Try to parse as JSON
+                        try:
+                            import json
+                            parsed = json.loads(keywords_val)
+                            if not isinstance(parsed, list):
+                                needs_repair = True
+                                repairs['keywords'] = []
+                        except:
+                            # Invalid JSON - repair it
+                            needs_repair = True
+                            repairs['keywords'] = []
+                elif keywords_val is None:
+                    needs_repair = True
+                    repairs['keywords'] = []
+            
+            # Check for corrupted tags (should be list, not 'None' string)
+            if 'tags' in node_data:
+                tags_val = node_data['tags']
+                if isinstance(tags_val, str):
+                    if tags_val.lower() == 'none' or tags_val == '':
+                        needs_repair = True
+                        repairs['tags'] = []
+                    else:
+                        # Try to parse as JSON
+                        try:
+                            import json
+                            parsed = json.loads(tags_val)
+                            if not isinstance(parsed, list):
+                                needs_repair = True
+                                repairs['tags'] = []
+                        except:
+                            # Invalid JSON - repair it
+                            needs_repair = True
+                            repairs['tags'] = []
+                elif tags_val is None:
+                    needs_repair = True
+                    repairs['tags'] = []
+            
+            # Check for corrupted metadata (should be dict, not 'None' string)
+            if 'metadata' in node_data:
+                metadata_val = node_data['metadata']
+                if isinstance(metadata_val, str):
+                    if metadata_val.lower() == 'none' or metadata_val == '':
+                        needs_repair = True
+                        repairs['metadata'] = {}
+                    else:
+                        # Try to parse as JSON
+                        try:
+                            import json
+                            parsed = json.loads(metadata_val)
+                            if not isinstance(parsed, dict):
+                                needs_repair = True
+                                repairs['metadata'] = {}
+                        except:
+                            # Invalid JSON - repair it
+                            needs_repair = True
+                            repairs['metadata'] = {}
+                elif metadata_val is None:
+                    needs_repair = True
+                    repairs['metadata'] = {}
+            
+            # Apply repairs if needed
+            if needs_repair:
+                try:
+                    # Update node data
+                    for key, value in repairs.items():
+                        node_data[key] = value
+                    
+                    # Try to create AtomicNote to validate
+                    try:
+                        note = AtomicNote(**node_data)
+                        # Update node in graph
+                        graph.graph.nodes[node_id].update(repairs)
+                        repaired_count += 1
+                        log_event("NODE_REPAIRED", {
+                            "node_id": node_id,
+                            "repairs": repairs
+                        })
+                    except Exception as e:
+                        log_debug(f"Failed to repair node {node_id}: {e}")
+                        # If repair failed, try to fix created_at at least
+                        if 'created_at' in repairs:
+                            node_data['created_at'] = repairs['created_at']
+                            graph.graph.nodes[node_id]['created_at'] = repairs['created_at']
+                except Exception as e:
+                    log_debug(f"Error repairing node {node_id}: {e}")
+        except Exception as e:
+            log_debug(f"Error checking node {node_id} for corruption: {e}")
+            continue
+    
+    return repaired_count
+
+
+def _validate_enzyme_parameters(
+    prune_config: Optional[Dict[str, Any]] = None,
+    suggest_config: Optional[Dict[str, Any]] = None,
+    refine_config: Optional[Dict[str, Any]] = None
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], List[str]]:
+    """
+    Validiert und normalisiert Enzyme-Parameter.
+    
+    Args:
+        prune_config: Config für prune_links
+        suggest_config: Config für suggest_relations
+        refine_config: Config für refine_summaries
+    
+    Returns:
+        Tuple von (validated_prune_config, validated_suggest_config, validated_refine_config, validation_warnings)
+        validation_warnings: Liste von Warnungen über korrigierte Parameter
+    """
+    warnings = []
+    # Default values
+    DEFAULT_PRUNE_MAX_AGE_DAYS = 90
+    DEFAULT_PRUNE_MIN_WEIGHT = 0.3
+    DEFAULT_SUGGEST_THRESHOLD = 0.75
+    DEFAULT_SUGGEST_MAX = 10
+    DEFAULT_REFINE_SIMILARITY_THRESHOLD = 0.75
+    DEFAULT_REFINE_MAX = 10
+    
+    # Validate prune_config (support both naming conventions)
+    validated_prune = {}
+    if prune_config:
+        # prune_max_age_days / max_age_days: >= 0 (default: 90)
+        max_age = prune_config.get("prune_max_age_days") or prune_config.get("max_age_days", DEFAULT_PRUNE_MAX_AGE_DAYS)
+        if not isinstance(max_age, (int, float)) or max_age < 0:
+            warning = f"Invalid prune_max_age_days: {max_age} (must be >= 0), using default: {DEFAULT_PRUNE_MAX_AGE_DAYS}"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_prune["prune_max_age_days"] = DEFAULT_PRUNE_MAX_AGE_DAYS
+        else:
+            validated_prune["prune_max_age_days"] = int(max_age)
+        
+        # prune_min_weight / min_weight: 0.0-1.0 (default: 0.3)
+        min_weight = prune_config.get("prune_min_weight") or prune_config.get("min_weight", DEFAULT_PRUNE_MIN_WEIGHT)
+        if not isinstance(min_weight, (int, float)) or min_weight < 0.0 or min_weight > 1.0:
+            warning = f"Invalid prune_min_weight: {min_weight} (must be 0.0-1.0), using default: {DEFAULT_PRUNE_MIN_WEIGHT}"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_prune["prune_min_weight"] = DEFAULT_PRUNE_MIN_WEIGHT
+        else:
+            validated_prune["prune_min_weight"] = float(min_weight)
+    else:
+        validated_prune = {
+            "prune_max_age_days": DEFAULT_PRUNE_MAX_AGE_DAYS,
+            "prune_min_weight": DEFAULT_PRUNE_MIN_WEIGHT
+        }
+    
+    # Validate suggest_config (support both naming conventions)
+    validated_suggest = {}
+    if suggest_config:
+        # suggest_threshold / threshold: 0.0-1.0 (default: 0.75)
+        threshold = suggest_config.get("suggest_threshold") or suggest_config.get("threshold", DEFAULT_SUGGEST_THRESHOLD)
+        if not isinstance(threshold, (int, float)) or threshold < 0.0 or threshold > 1.0:
+            warning = f"Invalid suggest_threshold: {threshold} (must be 0.0-1.0), using default: {DEFAULT_SUGGEST_THRESHOLD}"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_suggest["suggest_threshold"] = DEFAULT_SUGGEST_THRESHOLD
+        else:
+            validated_suggest["suggest_threshold"] = float(threshold)
+        
+        # suggest_max / max_suggestions: >= 0, max 1000 (default: 10)
+        suggest_max = suggest_config.get("suggest_max") or suggest_config.get("max_suggestions", DEFAULT_SUGGEST_MAX)
+        if not isinstance(suggest_max, (int, float)) or suggest_max < 0:
+            warning = f"Invalid suggest_max: {suggest_max} (must be >= 0), using default: {DEFAULT_SUGGEST_MAX}"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_suggest["suggest_max"] = DEFAULT_SUGGEST_MAX
+        elif suggest_max > 1000:
+            warning = f"suggest_max too high: {suggest_max} (max: 1000), capping at 1000"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_suggest["suggest_max"] = 1000
+        else:
+            validated_suggest["suggest_max"] = int(suggest_max)
+    else:
+        validated_suggest = {
+            "suggest_threshold": DEFAULT_SUGGEST_THRESHOLD,
+            "suggest_max": DEFAULT_SUGGEST_MAX
+        }
+    
+    # Validate refine_config (support both naming conventions)
+    validated_refine = {}
+    if refine_config:
+        # refine_similarity_threshold / similarity_threshold: 0.0-1.0 (default: 0.75)
+        similarity_threshold = refine_config.get("refine_similarity_threshold") or refine_config.get("similarity_threshold", DEFAULT_REFINE_SIMILARITY_THRESHOLD)
+        if not isinstance(similarity_threshold, (int, float)) or similarity_threshold < 0.0 or similarity_threshold > 1.0:
+            warning = f"Invalid refine_similarity_threshold: {similarity_threshold} (must be 0.0-1.0), using default: {DEFAULT_REFINE_SIMILARITY_THRESHOLD}"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_refine["refine_similarity_threshold"] = DEFAULT_REFINE_SIMILARITY_THRESHOLD
+        else:
+            validated_refine["refine_similarity_threshold"] = float(similarity_threshold)
+        
+        # refine_max / max_refinements: >= 0, max 1000 (default: 10)
+        refine_max = refine_config.get("refine_max") or refine_config.get("max_refinements", DEFAULT_REFINE_MAX)
+        if not isinstance(refine_max, (int, float)) or refine_max < 0:
+            warning = f"Invalid refine_max: {refine_max} (must be >= 0), using default: {DEFAULT_REFINE_MAX}"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_refine["refine_max"] = DEFAULT_REFINE_MAX
+        elif refine_max > 1000:
+            warning = f"refine_max too high: {refine_max} (max: 1000), capping at 1000"
+            log_debug(warning)
+            warnings.append(warning)
+            validated_refine["refine_max"] = 1000
+        else:
+            validated_refine["refine_max"] = int(refine_max)
+    else:
+        validated_refine = {
+            "refine_similarity_threshold": DEFAULT_REFINE_SIMILARITY_THRESHOLD,
+            "refine_max": DEFAULT_REFINE_MAX
+        }
+    
+    return validated_prune, validated_suggest, validated_refine, warnings
+
+
 def run_memory_enzymes(
     graph: GraphStore,
     llm_service: LLMService,
@@ -2002,9 +2492,16 @@ def run_memory_enzymes(
         graph: GraphStore Instanz
         llm_service: LLMService Instanz
         prune_config: Config für prune_links (optional)
+            - prune_max_age_days: >= 0 (default: 90) - Entfernt Edges älter als X Tage
+            - prune_min_weight: 0.0-1.0 (default: 0.3) - Behält nur Edges mit Gewicht >= X
         suggest_config: Config für suggest_relations (optional)
+            - suggest_threshold: 0.0-1.0 (default: 0.75) - Mindest-Ähnlichkeit für Relation-Vorschläge
+            - suggest_max: 0-1000 (default: 10) - Maximale Anzahl Vorschläge
         refine_config: Config für refine_summaries (optional)
+            - refine_similarity_threshold: 0.0-1.0 (default: 0.75) - Mindest-Ähnlichkeit für Summary-Refinement
+            - refine_max: 0-1000 (default: 10) - Maximale Anzahl zu refinender Summaries
         auto_add_suggestions: Wenn True, werden vorgeschlagene Relations automatisch hinzugefügt (default: False)
+        ignore_flags: Wenn True, ignoriert Validierungs-Flags (default: False)
     
     Returns:
         Dict mit Ergebnissen (inkl. "relations_auto_added" wenn auto_add_suggestions=True)
@@ -2025,6 +2522,7 @@ def run_memory_enzymes(
         "summaries_refined": 0,
         "notes_validated": 0,  # Anzahl validierte Notes
         "notes_corrected": 0,  # Anzahl korrigierte Notes
+        "corrupted_nodes_repaired": 0,  # Anzahl reparierte korrupte Nodes
         "quality_scores_calculated": 0,  # Anzahl berechneter Quality-Scores
         "low_quality_notes": [],  # Liste von Notes mit niedrigem Score (< 0.6)
         "keywords_normalized": 0,  # Anzahl normalisierte Keywords
@@ -2033,12 +2531,27 @@ def run_memory_enzymes(
         "edges_validated": 0,  # Anzahl validierte Edges
         "edges_removed": 0,  # Anzahl entfernte Edges (schwach/ohne Reasoning)
         "reasonings_added": 0,  # Anzahl ergänzte Reasoning-Felder
-        "types_standardized": 0  # Anzahl standardisierte Relation Types
+        "types_standardized": 0,  # Anzahl standardisierte Relation Types
+        "validation_warnings": []  # Liste von Warnungen über korrigierte Parameter
     }
     
-    # 1. Prune Links
-    prune_params = prune_config or {}
-    results["pruned_count"] = prune_links(graph, **prune_params)
+    # Validate and normalize parameters FIRST
+    validated_prune, validated_suggest, validated_refine, validation_warnings = _validate_enzyme_parameters(
+        prune_config, suggest_config, refine_config
+    )
+    
+    # Add validation warnings to results
+    results["validation_warnings"] = validation_warnings
+    
+    # 0. Repair Corrupted Nodes (FIRST - before any other operations)
+    results["corrupted_nodes_repaired"] = repair_corrupted_nodes(graph)
+    
+    # 1. Prune Links (use validated parameters)
+    results["pruned_count"] = prune_links(
+        graph,
+        max_age_days=validated_prune.get("prune_max_age_days", 90),
+        min_weight=validated_prune.get("prune_min_weight", 0.3)
+    )
     
     # 1.5. Prune Zombie Nodes (nach Links, damit keine orphaned Edges entstehen)
     results["zombie_nodes_removed"] = prune_zombie_nodes(graph)
@@ -2096,7 +2609,12 @@ def run_memory_enzymes(
             continue  # Skip invalid nodes
     
     if len(notes_for_merge) >= 2:
-        results["duplicates_merged"] = merge_duplicates(notes_for_merge, graph)
+        results["duplicates_merged"] = merge_duplicates(
+            notes_for_merge, 
+            graph, 
+            llm_service=llm_service,
+            content_similarity_threshold=0.98
+        )
     
     # 1.7. Normalize and Clean Keywords
     # Sammle Notes für Keyword-Normalisierung
@@ -2146,7 +2664,13 @@ def run_memory_enzymes(
         low_quality_notes = []
         for node_id in graph.graph.nodes():
             node_data = graph.graph.nodes[node_id]
+            # Handle None node_data gracefully
+            if node_data is None:
+                node_data = {}
             metadata = node_data.get("metadata", {})
+            # Handle None metadata gracefully
+            if metadata is None:
+                metadata = {}
             quality_score = metadata.get("quality_score")
             if quality_score is not None:
                 if quality_score < 0.6:
@@ -2166,7 +2690,13 @@ def run_memory_enzymes(
         quality_scores_count = 0
         for node_id in graph.graph.nodes():
             node_data = graph.graph.nodes[node_id]
+            # Handle None node_data gracefully
+            if node_data is None:
+                node_data = {}
             metadata = node_data.get("metadata", {})
+            # Handle None metadata gracefully
+            if metadata is None:
+                metadata = {}
             if "quality_score" in metadata:
                 quality_scores_count += 1
         
@@ -2227,13 +2757,23 @@ def run_memory_enzymes(
             continue  # Skip invalid nodes
     
     if len(notes) >= 2:
-        # 2.1. Refine Summaries (neue Funktion: macht ähnliche Summarys spezifischer)
-        refine_params = refine_config or {}
-        results["summaries_refined"] = refine_summaries(notes, graph, llm_service, **refine_params)
+        # 2.1. Refine Summaries (use validated parameters)
+        results["summaries_refined"] = refine_summaries(
+            notes,
+            graph,
+            llm_service,
+            similarity_threshold=validated_refine.get("refine_similarity_threshold", 0.75),
+            max_refinements=validated_refine.get("refine_max", 10)
+        )
         
-        # 2.2. Suggest Relations
-        suggest_params = suggest_config or {}
-        suggestions = suggest_relations(notes, graph, llm_service, **suggest_params)
+        # 2.2. Suggest Relations (use validated parameters)
+        suggestions = suggest_relations(
+            notes,
+            graph,
+            llm_service,
+            threshold=validated_suggest.get("suggest_threshold", 0.75),
+            max_suggestions=validated_suggest.get("suggest_max", 10)
+        )
         results["suggestions_count"] = len(suggestions)
         # Speichere Suggestions im Ergebnis für Rückgabe
         results["suggestions"] = [

@@ -215,8 +215,10 @@ elif name == "research_and_store":
             "max_sources": max_sources
         })
         
-        # Initialize researcher with configurable max_sources
-        researcher = ResearcherAgent(llm_service=controller.llm, max_sources=max_sources, mcp_tool_callback=None)
+            # Initialize researcher with configurable max_sources
+            # Note: MCP tool callback is None in MCP server context (would require MCP client)
+            # Researcher will use HTTP-based fallbacks (Google Search API, DuckDuckGo, Jina Reader HTTP)
+            researcher = ResearcherAgent(llm_service=controller.llm, max_sources=max_sources, mcp_tool_callback=None)
         
         # Perform research (uses HTTP-based tools directly)
         research_notes = await researcher.research(query=query, context=context)
@@ -273,8 +275,11 @@ Initialisiert den Researcher Agent.
 
 **Parameter:**
 - `llm_service` (Optional[LLMService]): LLM Service für Note-Erstellung
-- `max_sources` (int): Maximale Anzahl Quellen (default: 1)
+- `max_sources` (int): Maximale Anzahl Quellen (default: 1, konfigurierbar via `RESEARCHER_MAX_SOURCES`)
 - `mcp_tool_callback` (Optional[Callable]): Optionaler Callback für MCP Tools
+  - **Signature**: `async def mcp_tool_callback(tool_name: str, arguments: dict) -> Any`
+  - **Verwendung**: Wenn bereitgestellt, werden MCP Tools bevorzugt (felo-search, jina-reader)
+  - **Fallback**: Wenn `None` oder MCP Tools fehlschlagen, werden HTTP-basierte Tools verwendet
 
 **Beispiel:**
 ```python
@@ -305,17 +310,30 @@ Führt tiefe Web-Recherche durch.
 2. Content-Extraktion (`_extract_content`)
 3. Note-Erstellung (`_create_notes_from_research`)
 
+#### `research_sync(query, context) -> List[AtomicNote]`
+
+Synchroner Wrapper für `research()`. Nützlich für Tests oder non-async Kontexte.
+
+**Parameter:**
+- `query` (str): Recherche-Query
+- `context` (Optional[str]): Kontext
+
+**Rückgabe:**
+- `List[AtomicNote]`: Liste von erstellten Notes
+
+**Hinweis:** Nutzt `asyncio.run()` intern, sollte nur in non-async Kontexten verwendet werden.
+
 #### `async _search_web(query) -> List[Dict[str, Any]]`
 
 Sucht im Web nach relevanten URLs.
 
 **Strategie (in Prioritätsreihenfolge):**
-1. **MCP Tools** (wenn Callback verfügbar):
-   - `mcp_getweb_felo-search` (technische Recherche)
-   - `mcp_getweb_duckduckgo-search` (allgemeine Suche)
+1. **MCP Tools** (wenn `mcp_tool_callback` verfügbar):
+   - `mcp_getweb_felo-search` (technische Recherche, bevorzugt)
+   - `mcp_getweb_duckduckgo-search` (allgemeine Suche, Fallback)
 2. **HTTP-Fallbacks**:
-   - Google Search API (wenn konfiguriert)
-   - DuckDuckGo HTTP Search
+   - Google Search API (wenn konfiguriert: `GOOGLE_SEARCH_ENABLED=true`)
+   - DuckDuckGo HTTP Search (Instant Answer API + HTML Scraping mit BeautifulSoup als Fallback)
 
 **Rückgabe:**
 ```python
@@ -334,12 +352,12 @@ Sucht im Web nach relevanten URLs.
 Extrahiert Content von URLs.
 
 **Strategie (in Prioritätsreihenfolge):**
-1. **MCP Tools** (wenn Callback verfügbar):
-   - `mcp_getweb_jina-reader` (hohe Qualität)
+1. **MCP Tools** (wenn `mcp_tool_callback` verfügbar):
+   - `mcp_getweb_jina-reader` (hohe Qualität, bevorzugt)
 2. **HTTP-Fallbacks**:
-   - Jina Reader HTTP (lokal Docker oder Cloud)
-   - Unstructured (für PDFs)
-   - Readability (Fallback)
+   - **PDF-URLs**: Unstructured (Library → API Fallback)
+   - **Web-Content**: Jina Reader HTTP (lokal Docker → Cloud API Fallback)
+   - **Readability**: html2text oder BeautifulSoup (letzter Fallback)
 
 **Rückgabe:**
 ```python
@@ -399,7 +417,7 @@ Sucht mit Google Custom Search API.
 
 #### `search_duckduckgo(query, max_results) -> List[Dict]`
 
-Sucht mit DuckDuckGo HTTP API.
+Sucht mit DuckDuckGo (mehrere Strategien).
 
 **Parameter:**
 - `query` (str): Such-Query
@@ -407,42 +425,60 @@ Sucht mit DuckDuckGo HTTP API.
 
 **Rückgabe:** Liste von Search-Results
 
-#### `extract_with_jina_reader(url, max_length) -> str`
+**Strategie (in Prioritätsreihenfolge):**
+1. **Instant Answer API** (JSON-Format, keine API-Key nötig)
+2. **HTML Scraping** (Regex-Patterns + BeautifulSoup Fallback)
+
+**Hinweis:** DuckDuckGo erfordert keine API-Key und funktioniert als zuverlässiger Fallback.
+
+#### `extract_with_jina_reader(url, max_length, use_local) -> str`
 
 Extrahiert Content mit Jina Reader.
 
 **Parameter:**
 - `url` (str): URL zum Extrahieren
-- `max_length` (int): Max. Zeichen
+- `max_length` (int): Max. Zeichen (default: 10000)
+- `use_local` (bool): Versuche lokale Instanz zuerst (default: True)
 
-**Rückgabe:** Extrahierter Text
+**Rückgabe:** Extrahierter Text (Markdown-Format)
 
 **Strategie:**
-1. Lokale Docker-Instanz (wenn verfügbar)
-2. Cloud API (Fallback)
+1. **Lokale Docker-Instanz** (`http://localhost:2222/{URL}`) - wenn `JINA_READER_ENABLED=true` und `use_local=True`
+2. **Cloud API** (`https://r.jina.ai/{URL}`) - Fallback
+
+**Hinweis:** Lokale Jina Reader gibt Markdown mit Metadata-Header zurück (wird automatisch geparst).
 
 #### `extract_pdf_with_unstructured(url, max_length) -> str`
 
 Extrahiert Content von PDF-URLs mit Unstructured.
 
 **Parameter:**
-- `url` (str): PDF-URL
-- `max_length` (int): Max. Zeichen
+- `url` (str): PDF-URL (muss `.pdf` enthalten oder enden)
+- `max_length` (int): Max. Zeichen (default: 10000)
 
 **Rückgabe:** Extrahierter Text
 
-**Strategie:**
-1. Unstructured Library (wenn verfügbar)
-2. Unstructured API (Fallback)
+**Strategie (in Prioritätsreihenfolge):**
+1. **Unstructured Library** (`unstructured.partition.pdf`) - wenn `UNSTRUCTURED_USE_LIBRARY=true` und Library installiert
+2. **Unstructured API** (`unstructured.partition.api`) - wenn API konfiguriert (`UNSTRUCTURED_API_URL`)
+3. **Library Fallback** - wenn API fehlschlägt und Library verfügbar ist
+
+**Hinweis:** PDF wird zuerst in temporäre Datei heruntergeladen, dann extrahiert, danach gelöscht.
 
 #### `extract_with_readability(url) -> str`
 
-Extrahiert Content mit Readability (Fallback).
+Extrahiert Content mit Readability-Algorithmus (letzter Fallback).
 
 **Parameter:**
 - `url` (str): URL zum Extrahieren
 
-**Rückgabe:** Extrahierter Text
+**Rückgabe:** Extrahierter Text (Markdown oder Plain Text)
+
+**Strategie:**
+1. **html2text** (wenn verfügbar) - Konvertiert HTML zu Markdown
+2. **BeautifulSoup** (Fallback) - Entfernt Scripts/Styles, extrahiert Text
+
+**Hinweis:** Wird nur verwendet, wenn Jina Reader und Unstructured fehlschlagen.
 
 ---
 
@@ -660,9 +696,10 @@ for note in notes:
 
 Der Researcher Agent loggt alle wichtigen Events:
 
-- `RESEARCHER_TRIGGERED`: Automatische Triggerung
-- `RESEARCHER_MANUAL_RUN_START`: Manuelle Nutzung
-- `RESEARCHER_COMPLETED`: Recherche abgeschlossen
+- `RESEARCHER_TRIGGERED`: Automatische Triggerung (bei niedriger Confidence)
+- `RESEARCHER_MANUAL_RUN_START`: Manuelle Nutzung via MCP Tool gestartet
+- `RESEARCHER_MANUAL_RUN`: Manuelle Nutzung abgeschlossen (mit Details zu stored/failed notes)
+- `RESEARCHER_COMPLETED`: Recherche abgeschlossen (automatische Triggerung)
 - `RESEARCHER_ERROR`: Fehler während Recherche
 
 **Beispiel Event:**

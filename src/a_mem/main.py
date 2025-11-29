@@ -81,13 +81,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="add_file",
-            description="Stores the content of a file (e.g., .md) as a note in the memory system. Supports automatic chunking for large files (>16KB).",
+            description="Stores the content of a file (e.g., .md) as a note in the memory system. Supports automatic chunking for large files (>16KB). Note: Requires an absolute path or the file must be in the server directory.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the file to be stored (relative or absolute)."
+                        "description": "Path to the file to be stored. Must be an absolute path or the file must be located in the server directory."
                     },
                     "file_content": {
                         "type": "string",
@@ -298,6 +298,18 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextContent]:
     """Executes a tool."""
     
+    # Validate parameters for all tools
+    from .utils.validation import validate_tool_parameters
+    is_valid, validation_errors = validate_tool_parameters(name, arguments)
+    if not is_valid:
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "error": "Parameter validation failed",
+                "validation_errors": validation_errors
+            }, indent=2)
+        )]
+    
     if name == "create_atomic_note":
         content = arguments.get("content", "")
         source = arguments.get("source", "user_input")
@@ -330,13 +342,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
     
     elif name == "retrieve_memories":
         query = arguments.get("query", "")
-        max_results = arguments.get("max_results", 5)
-        
-        if not query:
-            return [TextContent(
-                type="text",
-                text=json.dumps({"error": "query is required"}, indent=2)
-            )]
+        max_results = int(arguments.get("max_results", 5))  # Normalize to int
         
         try:
             results = await controller.retrieve(query)
@@ -398,7 +404,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
     elif name == "add_file":
         file_path = arguments.get("file_path", "")
         file_content = arguments.get("file_content", "")
-        chunk_size = arguments.get("chunk_size", 15000)
+        chunk_size = int(arguments.get("chunk_size", 15000))  # Normalize to int
         
         # Check if file_path or file_content is provided
         if not file_path and not file_content:
@@ -411,10 +417,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             # Read file if file_path is provided
             if file_path:
                 path = Path(file_path)
+                # Try absolute path first, then relative to current working directory
+                if not path.is_absolute():
+                    # Try relative to current working directory
+                    cwd_path = Path.cwd() / path
+                    if cwd_path.exists():
+                        path = cwd_path
+                    else:
+                        # Try relative to server directory (where main.py is)
+                        server_dir = Path(__file__).parent.parent.parent
+                        server_path = server_dir / path
+                        if server_path.exists():
+                            path = server_path
+                
                 if not path.exists():
                     return [TextContent(
                         type="text",
-                        text=json.dumps({"error": f"File not found: {file_path}"}, indent=2)
+                        text=json.dumps({
+                            "error": f"File not found: {file_path}",
+                            "hint": "Try using an absolute path or ensure the file is in the server directory"
+                        }, indent=2)
                     )]
                 
                 try:
@@ -580,12 +602,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
         target = arguments.get("target_id", "")
         relation_type = arguments.get("relation_type", "relates_to")
         reasoning = arguments.get("reasoning", "Manual link")
-        weight = float(arguments.get("weight", 1.0))
-        if not source or not target:
-            return [TextContent(
-                type="text",
-                text=json.dumps({"error": "source_id and target_id are required"}, indent=2)
-            )]
+        weight = float(arguments.get("weight", 1.0))  # Normalize to float
+        
+        # Additional validation: weight must be 0.0-1.0
+        if weight < 0.0 or weight > 1.0:
+            weight = max(0.0, min(1.0, weight))  # Clamp to valid range
         result = await controller.add_relation(source, target, relation_type, reasoning, weight)
         return [TextContent(
             type="text",
@@ -616,7 +637,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
         
         # Log to file
         from datetime import datetime
-        log_file = Path(settings.DATA_DIR) / "graph_save.log"
+        # Import settings explicitly to avoid scope issues
+        from .config import settings as config_settings
+        log_file = Path(config_settings.DATA_DIR) / "graph_save.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
         
         def write_log(msg):
@@ -636,8 +659,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             write_log(f"[SAVE] [get_graph] Save completed")
             
             # Verify after save
-            if settings.GRAPH_PATH.exists():
-                with open(settings.GRAPH_PATH, 'r', encoding='utf-8') as f:
+            # Check if using GraphML (RustworkX) or JSON (NetworkX)
+            graphml_path = config_settings.GRAPH_PATH.with_suffix(".graphml")
+            if graphml_path.exists():
+                # RustworkX: GraphML format - verify using graph methods
+                saved_nodes = controller.storage.graph.number_of_nodes()
+                saved_links = controller.storage.graph.number_of_edges()
+                log_debug(f"[OK] [get_graph] Verified GraphML file: {saved_nodes} nodes, {saved_links} edges")
+                if saved_nodes == 0 and node_count > 0:
+                    write_log(f"[ERROR] [get_graph] ERROR: Graph had {node_count} nodes but saved file has 0 nodes!")
+            elif config_settings.GRAPH_PATH.exists():
+                # NetworkX: JSON format
+                with open(config_settings.GRAPH_PATH, 'r', encoding='utf-8') as f:
                     saved_data = json.load(f)
                     saved_nodes = len(saved_data.get("nodes", []))
                     saved_links = len(saved_data.get("links", []))
@@ -804,6 +837,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             if low_quality_notes:
                 response_data["low_quality_notes"] = low_quality_notes  # Notes mit niedrigem Quality-Score
             
+            # Add validation warnings if any
+            validation_warnings = results.get("validation_warnings", [])
+            if validation_warnings:
+                response_data["validation_warnings"] = validation_warnings
+                response_data["message"] += f" Note: {len(validation_warnings)} parameter(s) were corrected to default values."
+            
             return [TextContent(
                 type="text",
                 text=json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -817,21 +856,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
     elif name == "research_and_store":
         query = arguments.get("query", "")
         context = arguments.get("context", "Manual research request")
-        max_sources = arguments.get("max_sources", 1)
-        
-        if not query:
-            return [TextContent(
-                type="text",
-                text=json.dumps({"error": "query is required"}, indent=2)
-            )]
-        
-        # Validate max_sources
-        try:
-            max_sources = int(max_sources)
-            if max_sources < 1 or max_sources > 20:
-                max_sources = 1  # Reset to default if out of range
-        except (ValueError, TypeError):
-            max_sources = 1  # Reset to default if invalid
+        max_sources = int(arguments.get("max_sources", 1))  # Normalize to int (already validated)
         
         try:
             from .utils.researcher import ResearcherAgent
