@@ -105,6 +105,11 @@ All critical operations are logged to `data/events.jsonl`:
 - `KEYWORDS_NORMALIZED`: When keywords are normalized
 - `QUALITY_SCORES_CALCULATED`: When quality scores are calculated
 - `NOTES_VALIDATED`: When notes are validated
+- `TYPES_VALIDATED`: When note types are validated and corrected
+- `NOTES_ARCHIVED`: When old notes are archived (temporal cleanup)
+- `NOTES_DELETED`: When old notes are deleted (temporal cleanup)
+- `GRAPH_HEALTH_CALCULATED`: When graph health score is calculated
+- `DEAD_END_NODES_FOUND`: When dead-end nodes are detected
 - `LOW_QUALITY_NOTES_REMOVED`: When low-quality notes are removed
 - `CORRUPTED_NODES_REPAIRED`: When corrupted nodes are repaired
 - `RELATIONS_SUGGESTED`: When new connections are found
@@ -122,6 +127,10 @@ Autonomous background processes that maintain graph health:
 - **Keyword Normalizer**: Normalizes and cleans keywords (removes duplicates, corrects typos, limits to max 7 keywords)
 - **Quality Score Calculator**: Calculates quality scores for notes (based on content, metadata, connections)
 - **Note Validator**: Validates notes and corrects missing/invalid fields (summary, keywords, tags)
+- **Type Validator**: Validates and corrects invalid note types using LLM-based classification
+- **Temporal Note Cleanup**: Archives or deletes notes older than specified age (default: 365 days)
+- **Graph Health Score Calculator**: Calculates overall graph health score (0.0-1.0) based on average note quality, connectivity, edge quality, and completeness
+- **Dead-End Node Detector**: Identifies nodes with incoming but no outgoing edges (dead ends in knowledge flow)
 - **Low Quality Note Remover**: Removes irrelevant notes (CAPTCHA pages, error pages, spam)
 - **Summary Refiner**: Refines similar summaries to make them more specific and distinct
 - **Corrupted Node Repairer**: Repairs corrupted nodes (missing fields, invalid data)
@@ -131,10 +140,10 @@ Autonomous background processes that maintain graph health:
 ### Automatic Scheduler
 The system automatically runs memory enzymes every hour:
 - Runs in background without blocking MCP operations
-- Executes 14+ maintenance operations in optimized sequence
+- Executes 18+ maintenance operations in optimized sequence
 - Logs all maintenance activities with detailed metrics
 - Gracefully handles errors and continues running
-- **Comprehensive Results**: Returns detailed statistics for all operations (pruned links, merged duplicates, validated notes, quality scores, etc.)
+- **Comprehensive Results**: Returns detailed statistics for all operations (pruned links, merged duplicates, validated notes, quality scores, graph health score, dead-end nodes, etc.)
 
 ### Researcher Agent
 Deep web research for low-confidence queries with JIT context optimization:
@@ -348,7 +357,7 @@ python mcp_server.py
 13. **`get_graph`** - Returns the full graph snapshot (nodes + edges) for visualization
 
 #### Memory Maintenance
-14. **`run_memory_enzymes`** - Runs comprehensive memory maintenance: prunes old/weak links and zombie nodes, merges duplicates, validates and fixes edges, removes self-loops, links isolated nodes, normalizes keywords, calculates quality scores, validates notes, removes low-quality content, refines summaries, repairs corrupted nodes, suggests new relations, and digests overcrowded nodes. Automatically optimizes graph structure with 14+ maintenance operations
+14. **`run_memory_enzymes`** - Runs comprehensive memory maintenance: prunes old/weak links and zombie nodes, merges duplicates, validates and fixes edges, removes self-loops, links isolated nodes, normalizes keywords, calculates quality scores, validates notes and types, performs temporal cleanup, calculates graph health score, detects dead-end nodes, removes low-quality content, refines summaries, repairs corrupted nodes, suggests new relations, and digests overcrowded nodes. Automatically optimizes graph structure with 18+ maintenance operations
 
 #### Research & Web Integration
 15. **`research_and_store`** - Performs deep web research on a query and stores findings as atomic notes. Uses Google Search API (if configured) or DuckDuckGo HTTP search, extracts content with Jina Reader (local Docker or cloud), and processes PDFs with Unstructured. Automatically creates notes with metadata, keywords, and tags.
