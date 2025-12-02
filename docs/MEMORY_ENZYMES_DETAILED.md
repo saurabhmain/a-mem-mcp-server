@@ -19,23 +19,28 @@
 
 ### Hauptmerkmale
 
-**14+ Maintenance Operations:**
+**18 Maintenance Operations:**
 
 - ✅ **Automatischer Scheduler**: Läuft stündlich im Hintergrund
 - ✅ **Corrupted Node Repairer**: Repariert korrupte Nodes (z.B. 'None' Strings)
-- ✅ **Link Pruner**: Entfernt alte/schwache Links und Zombie Nodes
+- ✅ **Link Pruner**: Entfernt alte/schwache Links (max_age_days: 90, min_weight: 0.3)
 - ✅ **Zombie Node Remover**: Entfernt Nodes ohne Content
 - ✅ **Low Quality Note Remover**: Entfernt irrelevante Notes (CAPTCHA, Fehlerseiten)
 - ✅ **Self-Loop Remover**: Entfernt Self-Referencing Edges
 - ✅ **Edge Validator**: Validiert und korrigiert Edges (Reasoning, Types, schwache Edges)
-- ✅ **Duplicate Merger**: Findet und merged Duplikate (exakt und semantisch)
-- ✅ **Keyword Normalizer**: Normalisiert und bereinigt Keywords
+- ✅ **Duplicate Merger**: Findet und merged Duplikate (exakt und semantisch, threshold: 0.98)
+- ✅ **Keyword Normalizer**: Normalisiert und bereinigt Keywords (max: 7 keywords)
+- ✅ **Type Validator**: Validiert und korrigiert Note-Types via LLM
 - ✅ **Note Validator**: Validiert und korrigiert Notes (Content, Summary, Keywords, Tags)
-- ✅ **Quality Score Calculator**: Berechnet Quality-Scores für Notes
-- ✅ **Summary Refiner**: Macht ähnliche Summarys spezifischer
-- ✅ **Relation Suggester**: Findet neue semantische Verbindungen
-- ✅ **Isolated Node Linker**: Verlinkt isolierte Nodes automatisch
-- ✅ **Summary Digester**: Komprimiert überfüllte Nodes
+- ✅ **Quality Score Calculator**: Berechnet Quality-Scores für Notes (0.0-1.0)
+- ✅ **Isolated Node Finder**: Identifiziert Nodes ohne Verbindungen
+- ✅ **Isolated Node Linker**: Verlinkt isolierte Nodes automatisch (similarity: 0.70)
+- ✅ **Summary Refiner**: Macht ähnliche Summarys spezifischer (similarity: 0.75)
+- ✅ **Relation Suggester**: Findet neue semantische Verbindungen (threshold: 0.75)
+- ✅ **Summary Digester**: Komprimiert überfüllte Nodes (>8 children)
+- ✅ **Temporal Note Cleanup**: Archiviert/löscht alte Notes (max_age_days: 365)
+- ✅ **Graph Health Score Calculator**: Berechnet Graph Health Score (0.0-1.0)
+- ✅ **Dead-End Node Detector**: Identifiziert Nodes mit eingehenden aber keinen ausgehenden Edges
 
 ---
 
@@ -828,6 +833,44 @@ Zusammenfassung:"""
 
 **Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 1112-1572
 
+### 6.5. Type Validator (`validate_note_types`)
+
+**Zweck:** Validiert und korrigiert Note-Types via LLM-basierte Klassifikation.
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+- `llm_service` (Optional[LLMService]): LLM Service für Type-Erkennung
+- `ignore_flags` (bool): Ignoriere Flags (default: False)
+
+**Rückgabe:** Dict mit:
+- `types_validated`: Anzahl validierte Types
+- `types_corrected`: Anzahl korrigierte Types
+- `invalid_types`: Liste von Node-IDs mit ungültigen Types
+
+**Validierungen:**
+- Prüft ob Type vorhanden und gültig ist (rule, procedure, concept, tool, reference, integration)
+- Korrigiert ungültige Types basierend auf Content via LLM
+- Setzt Flags für bereits validierte Types (max_flag_age_days: 30)
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 2477-2613
+
+---
+
+### 6.6. Isolated Node Finder (`find_isolated_nodes`)
+
+**Zweck:** Identifiziert Nodes ohne jegliche Verbindungen (weder eingehende noch ausgehende Edges).
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+
+**Rückgabe:** Liste von Node-IDs ohne Verbindungen
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 800-826
+
+---
+
 ### 7. Summary Refiner (`refine_summaries`)
 
 **Zweck:** Macht ähnliche Summarys spezifischer (verhindert Duplikate).
@@ -863,15 +906,100 @@ Zusammenfassung:"""
 
 **Rückgabe:** Anzahl erstellter Links
 
-**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 614-700
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 828-990
 
-### 9. Hauptfunktion (`run_memory_enzymes`)
+---
+
+### 9. Temporal Note Cleanup (`temporal_note_cleanup`)
+
+**Zweck:** Archiviert oder löscht Notes älter als ein bestimmtes Alter (default: 365 Tage).
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+- `max_age_days` (int): Maximale Alter in Tagen (default: 365 = 1 Jahr)
+- `archive_instead_of_delete` (bool): Wenn True, markiert Notes als archiviert statt zu löschen (default: True)
+
+**Rückgabe:** Dict mit:
+- `notes_checked`: Anzahl geprüfte Notes
+- `notes_archived`: Anzahl archivierte Notes
+- `notes_deleted`: Anzahl gelöschte Notes (wenn archive_instead_of_delete=False)
+- `old_notes`: Liste von Node-IDs mit alten Notes
+
+**Strategie:**
+- Prüft `created_at` Feld aller Notes
+- Notes älter als `max_age_days` werden archiviert oder gelöscht
+- Archivierte Notes werden mit `archived: true` in Metadata markiert
+- Gelöschte Notes werden komplett aus dem Graph entfernt
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 2615-2715
+
+---
+
+### 10. Graph Health Score Calculator (`calculate_graph_health_score`)
+
+**Zweck:** Berechnet einen Gesamt-Health-Score für den Graph (0.0 - 1.0).
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+
+**Rückgabe:** Dict mit:
+- `health_score`: Gesamt-Score (0.0 - 1.0)
+- `health_level`: "excellent" | "good" | "fair" | "poor" | "very_poor"
+- `average_quality_score`: Durchschnittlicher Quality-Score
+- `connectivity_score`: Connectivity-Score (0.0 - 1.0)
+- `edge_quality_score`: Edge-Quality-Score (0.0 - 1.0)
+- `completeness_score`: Completeness-Score (0.0 - 1.0)
+- `isolated_nodes_ratio`: Anteil isolierter Nodes (0.0 - 1.0)
+- `edges_with_reasoning_ratio`: Anteil Edges mit Reasoning (0.0 - 1.0)
+
+**Bewertungskriterien:**
+- **Durchschnittlicher Quality-Score** (25%): Durchschnitt aller Note Quality-Scores
+- **Connectivity-Score** (25%): Anteil nicht-isolierter Nodes
+- **Edge-Quality-Score** (25%): Anteil Edges mit Reasoning
+- **Completeness-Score** (25%): Anteil Notes mit allen Feldern (content, summary, keywords, tags)
+
+**Health Levels:**
+- `excellent`: ≥ 0.8
+- `good`: 0.6 - 0.79
+- `fair`: 0.4 - 0.59
+- `poor`: 0.2 - 0.39
+- `very_poor`: < 0.2
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 2717-2839
+
+---
+
+### 11. Dead-End Node Detector (`find_dead_end_nodes`)
+
+**Zweck:** Identifiziert Dead-End Nodes (Nodes mit eingehenden, aber keine ausgehenden Edges).
+
+**Parameter:**
+- `notes` (Dict[str, AtomicNote]): Dict aller Notes
+- `graph` (GraphStore): Graph-Instanz
+
+**Rückgabe:** Dict mit:
+- `dead_end_nodes`: Liste von Node-IDs mit Dead-Ends
+- `dead_end_count`: Anzahl Dead-End Nodes
+- `dead_end_details`: Liste mit Details (id, in_degree, out_degree, summary)
+
+**Strategie:**
+- Prüft die tatsächlichen Relations im Graph
+- Identifiziert Nodes mit `in_degree > 0` aber `out_degree = 0`
+- Dead-End Nodes blockieren den Knowledge Flow (nur Input, kein Output)
+
+**Code:** Siehe `src/a_mem/utils/enzymes.py` Zeilen 2841-2919
+
+---
+
+### 12. Hauptfunktion (`run_memory_enzymes`)
 
 **Zweck:** Führt alle Enzyme aus in optimierter Reihenfolge.
 
 **Ausführungsreihenfolge:**
-1. **Repair Phase**: `repair_corrupted_nodes()` - Repariert korrupte Nodes
-2. **Cleanup Phase**: 
+0. **Repair Phase**: `repair_corrupted_nodes()` - Repariert korrupte Nodes (ZUERST)
+1. **Cleanup Phase**: 
    - `prune_links()` - Entfernt alte/schwache Links
    - `prune_zombie_nodes()` - Entfernt Zombie Nodes
    - `remove_low_quality_notes()` - Entfernt irrelevante Notes
@@ -879,13 +1007,19 @@ Zusammenfassung:"""
    - `validate_and_fix_edges()` - Validiert und korrigiert Edges
    - `merge_duplicates()` - Merged Duplikate
    - `normalize_and_clean_keywords()` - Normalisiert Keywords
-3. **Optimization Phase**:
-   - `validate_notes()` - Validiert Notes
+   - `validate_note_types()` - Validiert Note-Types
+   - `validate_notes()` - Validiert Notes (inkl. Quality Score Calculation)
+   - `find_isolated_nodes()` - Findet isolierte Nodes
+   - `link_isolated_nodes()` - Verlinkt isolierte Nodes
+2. **Optimization Phase**:
    - `refine_summaries()` - Verfeinert Summarys
    - `suggest_relations()` - Schlägt neue Relations vor
-   - `link_isolated_nodes()` - Verlinkt isolierte Nodes
-4. **Compression Phase**:
+3. **Compression Phase**:
    - `digest_node()` - Komprimiert überfüllte Nodes
+4. **Temporal & Health Phase**:
+   - `temporal_note_cleanup()` - Archiviert/löscht alte Notes
+   - `calculate_graph_health_score()` - Berechnet Graph Health Score
+   - `find_dead_end_nodes()` - Findet Dead-End Nodes
 
 **Parameter:** Siehe MCP Tool Definition (Zeilen 216-265)
 
@@ -916,17 +1050,27 @@ Zusammenfassung:"""
 graph TD
     A[Scheduler Start] --> B[Wait Interval]
     B --> C[Run Enzymes]
-    C --> D[Prune Links]
-    D --> E[Remove Zombies]
-    E --> F[Merge Duplicates]
-    F --> G[Validate Notes]
-    G --> H[Refine Summaries]
+    C --> C0[Repair Corrupted Nodes]
+    C0 --> D[Prune Links]
+    D --> E[Prune Zombie Nodes]
+    E --> E1[Remove Low Quality Notes]
+    E1 --> E2[Remove Self-Loops]
+    E2 --> E3[Validate & Fix Edges]
+    E3 --> F[Merge Duplicates]
+    F --> F1[Normalize Keywords]
+    F1 --> F2[Validate Note Types]
+    F2 --> G[Validate Notes]
+    G --> G1[Find Isolated Nodes]
+    G1 --> G2[Link Isolated Nodes]
+    G2 --> H[Refine Summaries]
     H --> I[Suggest Relations]
-    I --> J[Link Isolated Nodes]
-    J --> K[Digest Nodes]
-    K --> L[Save Graph]
-    L --> M[Log Results]
-    M --> B
+    I --> J[Digest Nodes]
+    J --> J1[Temporal Cleanup]
+    J1 --> J2[Calculate Graph Health]
+    J2 --> J3[Find Dead-End Nodes]
+    J3 --> K[Save Graph]
+    K --> L[Log Results]
+    L --> B
 ```
 
 ### Manueller Workflow (MCP Tool)
@@ -942,7 +1086,6 @@ sequenceDiagram
     User->>MCP: run_memory_enzymes()
     MCP->>Controller: call_tool()
     Controller->>Enzymes: run_memory_enzymes()
-    Enzymes->>Enzymes: prune_links()
     Enzymes->>Enzymes: repair_corrupted_nodes()
     Enzymes->>Enzymes: prune_links()
     Enzymes->>Enzymes: prune_zombie_nodes()
@@ -951,10 +1094,16 @@ sequenceDiagram
     Enzymes->>Enzymes: validate_and_fix_edges()
     Enzymes->>Enzymes: merge_duplicates()
     Enzymes->>Enzymes: normalize_and_clean_keywords()
+    Enzymes->>Enzymes: validate_note_types()
     Enzymes->>Enzymes: validate_notes()
+    Enzymes->>Enzymes: find_isolated_nodes()
+    Enzymes->>Enzymes: link_isolated_nodes()
     Enzymes->>Enzymes: refine_summaries()
     Enzymes->>Enzymes: suggest_relations()
-    Enzymes->>Enzymes: link_isolated_nodes()
+    Enzymes->>Enzymes: digest_node()
+    Enzymes->>Enzymes: temporal_note_cleanup()
+    Enzymes->>Enzymes: calculate_graph_health_score()
+    Enzymes->>Enzymes: find_dead_end_nodes()
     Enzymes->>Graph: save_snapshot()
     Enzymes-->>Controller: results
     Controller-->>MCP: JSON response
@@ -964,30 +1113,36 @@ sequenceDiagram
 ### Detaillierter Enzyme-Workflow
 
 ```mermaid
-graph LR
-    A[run_memory_enzymes] --> B[1. Cleanup Phase]
+graph TD
+    A[run_memory_enzymes] --> E0[0. Repair Phase]
+    E0 --> E1[repair_corrupted_nodes]
+    
+    E1 --> B[1. Cleanup Phase]
     B --> B1[prune_links]
-    B --> B2[remove_zombie_nodes]
-    B --> B3[merge_duplicates]
-    B --> B4[remove_self_loops]
-    B --> B5[validate_edges]
+    B1 --> B2[prune_zombie_nodes]
+    B2 --> B3[remove_low_quality_notes]
+    B3 --> B4[remove_self_loops]
+    B4 --> B5[validate_and_fix_edges]
+    B5 --> B6[merge_duplicates]
+    B6 --> B7[normalize_and_clean_keywords]
+    B7 --> B8[validate_note_types]
+    B8 --> B9[validate_notes]
+    B9 --> B10[find_isolated_nodes]
+    B10 --> B11[link_isolated_nodes]
     
-    A --> C[2. Optimization Phase]
-    C --> C1[validate_notes]
-    C --> C2[refine_summaries]
-    C --> C3[suggest_relations]
-    C --> C4[link_isolated_nodes]
+    B11 --> C[2. Optimization Phase]
+    C --> C1[refine_summaries]
+    C1 --> C2[suggest_relations]
     
-    A --> E[0. Repair Phase]
-    E --> E1[repair_corrupted_nodes]
-    
-    B --> B6[normalize_keywords]
-    
-    A --> D[3. Compression Phase]
+    C2 --> D[3. Compression Phase]
     D --> D1[digest_node]
     
-    A --> E[4. Results]
-    E --> E1[Return Stats]
+    D1 --> F[4. Temporal & Health Phase]
+    F --> F1[temporal_note_cleanup]
+    F1 --> F2[calculate_graph_health_score]
+    F2 --> F3[find_dead_end_nodes]
+    
+    F3 --> G[Return Results]
 ```
 
 ---
@@ -1109,7 +1264,15 @@ print(f"Quality scores calculated: {results['quality_scores_calculated']}")
 print(f"Suggestions: {results['suggestions_count']}")
 print(f"Summaries refined: {results['summaries_refined']}")
 print(f"Notes validated: {results['notes_validated']}")
+print(f"Isolated nodes found: {results['isolated_nodes_found']}")
 print(f"Isolated nodes linked: {results['isolated_nodes_linked']}")
+print(f"Types validated: {results['types_validated']}")
+print(f"Types corrected: {results['types_corrected']}")
+print(f"Notes archived: {results['notes_archived']}")
+print(f"Notes deleted: {results['notes_deleted']}")
+print(f"Graph health score: {results['graph_health_score']}")
+print(f"Graph health level: {results['graph_health_level']}")
+print(f"Dead-end nodes found: {results['dead_end_nodes_found']}")
 ```
 
 ### Beispiel 3: Via MCP Tool
@@ -1194,7 +1357,14 @@ Enzyme loggen alle wichtigen Events:
 - `RELATION_AUTO_ADDED`: Relation automatisch hinzugefügt
 - `SUMMARIES_REFINED`: Summarys verfeinert
 - `NOTES_VALIDATED`: Notes validiert
+- `TYPES_VALIDATED`: Note-Types validiert
+- `TYPES_CORRECTED`: Note-Types korrigiert
+- `ISOLATED_NODES_FOUND`: Isolierte Nodes gefunden
 - `ISOLATED_NODES_LINKED`: Isolierte Nodes verlinkt
+- `NOTES_ARCHIVED`: Notes archiviert
+- `NOTES_DELETED`: Notes gelöscht
+- `GRAPH_HEALTH_CALCULATED`: Graph Health Score berechnet
+- `DEAD_END_NODES_FOUND`: Dead-End Nodes gefunden
 
 **Beispiel Event:**
 ```json
@@ -1219,8 +1389,16 @@ Enzyme loggen alle wichtigen Events:
       "suggestions_count": 3,
       "summaries_refined": 2,
       "notes_validated": 50,
+      "types_validated": 50,
+      "types_corrected": 2,
+      "isolated_nodes_found": 3,
       "isolated_nodes_linked": 2,
-      "digested_count": 0
+      "digested_count": 0,
+      "notes_archived": 1,
+      "notes_deleted": 0,
+      "graph_health_score": 0.75,
+      "graph_health_level": "good",
+      "dead_end_nodes_found": 2
     },
     "interval_hours": 1.0
   }
@@ -1255,7 +1433,7 @@ Enzyme prüfen Flags und verarbeiten nur notwendige Notes.
 - [ ] Parallel Processing (Multi-Threading)
 - [ ] Custom Enzyme-Plugins
 - [ ] Performance-Metriken
-- [ ] Graph-Health-Scoring
+- [x] Graph-Health-Scoring (✅ Implementiert)
 
 ---
 
@@ -1282,5 +1460,5 @@ Enzyme prüfen Flags und verarbeiten nur notwendige Notes.
 17. **calculate_graph_health_score** - Berechnet Graph Health Score (NEU)
 18. **find_dead_end_nodes** - Findet Dead-End Nodes (NEU)
 
-**Letzte Aktualisierung:** 2025-12-01
+**Letzte Aktualisierung:** 2025-01-27
 
