@@ -530,8 +530,7 @@ cat data/events.jsonl | jq .
 - `docs/MCP_SERVER_TEST_REPORT.md` - MCP Server Integration Tests
 - `docs/EMBEDDING_DIMENSIONS.md` - Embedding Dimension Handling Guide
 - `docs/RESEARCHER_AGENT_DETAILED.md` - **Ausführliche Researcher Agent Dokumentation** (Code-Einbindung, Funktionen, Workflow)
-- `docs/MEMORY_ENZYMES_DETAILED.md` - **Ausführliche Memory Enzymes Dokumentation** (Code-Einbindung, Funktionen, Workflow)
-- `docs/ARCHITECTURE_DIAGRAM.md` - **Vollständige Architektur-Darstellung** (Mermaid Diagramme)
+- `docs/MEMORY_ENZYMES_DETAILED.md` - **Ausführliche Memory Enzymes Dokumentation** (Code-Einbindung, Funktionen, Workflow, 19+ Operations)
 - `tools/RESEARCHER_README.md` - Researcher Agent Quick Reference
 
 ### 📊 Visual Diagrams
@@ -553,8 +552,9 @@ Aktualisierte Mermaid-basierte SVG-Diagramme mit weißem Hintergrund und schwarz
 #### Type Classification System
 <img src="docs/a-mem-type-classification.svg" alt="Type Classification" width="3200" style="max-width: 100%; height: auto;">
 
-**Vollständige Mermaid-Diagramme** (inkl. Sequence Diagrams, Workflows) finden Sie in:
-- `docs/ARCHITECTURE_DIAGRAM.md` - Vollständige Architektur-Darstellung mit allen Diagrammen
+**Weitere Dokumentation:**
+- `docs/MEMORY_ENZYMES_DETAILED.md` - Ausführliche Memory Enzymes Dokumentation mit allen 19+ Operations
+- `docs/RESEARCHER_AGENT_DETAILED.md` - Ausführliche Researcher Agent Dokumentation
 ## 🧪 Tests
 
 ```bash
