@@ -1,5 +1,7 @@
 # 🎉 a-mem-mcp-server - Memory Integration Made Easy
 
+[![SafeSkill 89/100](https://img.shields.io/badge/SafeSkill-89%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/saurabhmain-a-mem-mcp-server)
+
 ## 🚀 Getting Started
 
 Welcome! This guide will help you download and run the A-MEM MCP Server on your computer. This server connects seamlessly with IDEs like Cursor and VSCode to enhance your research experience.
